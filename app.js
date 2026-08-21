@@ -80,6 +80,11 @@
     var cur = currentAccount || (localAuthGet() && localAuthGet().account);
     if (!cur) return;
     var c = ghCfg() || {};
+    if (MODE === 'github') {
+      // GitHub Pages 部署版：云端令牌/仓库已内置，登录即自动开启跨设备同步，无需用户配置。
+      // 关键修复：旧逻辑只写账号名、不写内置令牌，导致新设备登录后 loadData 因“无令牌”提前返回空 → 不同步。
+      c.token = DEPLOY_TOKEN; c.user = DEPLOY_USER; c.repo = DEPLOY_REPO;
+    }
     c.account = cur;
     setGhCfg(c);
   }
@@ -369,7 +374,7 @@
   // 部署令牌（自用仓库专用）：以拼接方式存放，避免被公开仓库的密钥扫描拦截；如需更换请在 GitHub 重新生成 PAT 后替换下面两段
   var DEPLOY_TOKEN = 'ghp_' + 'xPeIY2W6Ku9sG1Iz24CWcWE0bWvRs03YuoZF';
   var SYNC_KEY = 'beiji_sync_v1';
-  var APP_VERSION = '2026.08.21c';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
+  var APP_VERSION = '2026.08.22a';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
   var cloudSha = null;        // 云端当前文件 sha（轮询判断是否变更）
   var cloudCardCount = 0;     // 云端当前卡片数（用于防“空覆盖”）
   var syncTimer = null;       // 实时同步轮询定时器
@@ -1313,9 +1318,9 @@
       '<button class="btn primary" data-act="save-ai">保存 AI 配置</button>' +
       '</div>' +
       '<div class="card">' +
-      '<div class="lbl">云端同步（GitHub 双保险 · 必开）</div>' +
+      '<div class="lbl">云端同步' + (MODE === 'github' ? '（已自动开启 · 无需任何配置）' : '（GitHub 双保险）') + '</div>' +
       (MODE === 'github'
-        ? '<p class="hint">你已部署在 GitHub Pages，云端仓库锁定为 <b>' + DEPLOY_USER + '/' + DEPLOY_REPO + '</b>。只需填一次下方令牌，之后<b>每次保存都会自动双写：本机 + 云端</b>，换手机/清缓存都不丢。</p>'
+        ? '<p class="hint">✅ 云端同步已<b>自动开启</b>：内置令牌 + 仓库 <b>' + DEPLOY_USER + '/' + DEPLOY_REPO + '</b>，<b>每次保存都会自动双写「本机 + 云端」</b>。换手机或清缓存后，<b>用同一个账号（手机号）登录，就会自动拉取全部卡片</b>——不用填令牌、不用任何设置。</p>'
         : '<p class="hint">填入 GitHub 令牌（需 repo 权限）后，数据自动备份到你的仓库。令牌只存本机，不写代码。</p>') +
       (MODE === 'github'
         ? ''
@@ -1323,13 +1328,22 @@
           '<input id="gh-user" class="inp" placeholder="如 appleagainjie" value="' + esc(gc.user || DEPLOY_USER) + '">' +
           '<label class="lbl">数据仓库名</label>' +
           '<input id="gh-repo" class="inp" placeholder="beijiuan" value="' + esc(gc.repo || DEPLOY_REPO) + '">') +
-      '<label class="lbl">个人访问令牌 PAT（需 repo 权限，仅填一次）</label>' +
-      '<input id="gh-token" type="password" class="inp" placeholder="ghp_... 或 github_pat_..." value="' + (gc.token ? '（已保存）' : '') + '">' +
-      (MODE === 'github' ? '<button class="btn" data-act="fill-deploy-token">一键填入部署令牌</button>' : '') +
-      '<p class="hint">数据按你的登录账号分文件存储：<b>' + esc(currentAccount || (localAuthGet() && localAuthGet().account) || '（未登录）') + '</b>。令牌生成：GitHub→右上角头像→Settings→Developer settings→Personal access tokens→Generate new token(classic)，勾 repo，生成后粘贴。</p>' +
-      '<div class="ghbtns"><button class="btn primary" data-act="save-gh">保存并开启云端</button>' +
-      '<button class="btn" data-act="backup-gh">立即备份</button>' +
-      '<button class="btn" data-act="sync-now">立即同步（跨设备）</button></div>' +
+      (MODE === 'github'
+        ? ''
+        : '<label class="lbl">个人访问令牌 PAT（需 repo 权限，仅填一次）</label>' +
+          '<input id="gh-token" type="password" class="inp" placeholder="ghp_... 或 github_pat_..." value="' + (gc.token ? '（已保存）' : '') + '">') +
+      (MODE === 'github'
+        ? ''
+        : '<button class="btn" data-act="fill-deploy-token">一键填入部署令牌</button>') +
+      '<p class="hint">数据按登录账号分文件存储（当前账号：<b>' + esc(currentAccount || (localAuthGet() && localAuthGet().account) || '未登录') + '</b>）。<b>务必在所有设备上用同一个手机号登录</b>，才能互相同步。</p>' +
+      '<div class="ghbtns">' +
+        (MODE === 'github'
+          ? '<button class="btn" data-act="backup-gh">立即备份到云端</button>' +
+            '<button class="btn primary" data-act="sync-now">立即同步（跨设备拉取）</button>'
+          : '<button class="btn primary" data-act="save-gh">保存并开启云端</button>' +
+            '<button class="btn" data-act="backup-gh">立即备份</button>' +
+            '<button class="btn" data-act="sync-now">立即同步（跨设备）</button>') +
+      '</div>' +
       '<p class="hint" id="gh-status"></p>' +
       '<p class="hint" id="sync-status"></p>' +
       '</div>' +
