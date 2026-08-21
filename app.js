@@ -305,7 +305,8 @@
       return {}; // 永不 reject，避免上层界面卡死
     });
   }
-  function ghLoad() {
+  function ghLoad(opts) {
+    var silent = !!(opts && opts.silent);  // 后台静默同步时，不要弹 toast 打扰用户
     // GitHub Pages 部署：单人自用仓库，无条件使用部署令牌
     if (MODE === 'github') {
       var _lc = ghCfg() || {};
@@ -348,8 +349,8 @@
         }, function (e) { clearT(); throw e; })
         .then(function (res) { clearT(); return res; });
     }
-    return attempt(60000).catch(function (e1) {
-      if (e1 && (e1.name === 'AbortError' || /timeout|Failed to fetch|network/i.test(e1.message || ''))) return attempt(60000);
+    return attempt(15000).catch(function (e1) {
+      if (e1 && (e1.name === 'AbortError' || /timeout|Failed to fetch|network/i.test(e1.message || ''))) return attempt(15000);
       throw e1;
     }).then(function (res) {
       if (res && (res.cards || []).length) {
@@ -365,7 +366,7 @@
         ? '云端读取超时（本机数据仍有效，稍后自动重试）'
         : ('GitHub 读取失败：' + (e && e.message || '未知错误') + '（本机数据仍有效）');
       setSyncStatus(false, (e && e.message) || '未知错误');
-      toast(msg);
+      if (!silent) toast(msg);
       return null;
     });
   }
@@ -374,7 +375,7 @@
   // 部署令牌（自用仓库专用）：以拼接方式存放，避免被公开仓库的密钥扫描拦截；如需更换请在 GitHub 重新生成 PAT 后替换下面两段
   var DEPLOY_TOKEN = 'ghp_' + 'xPeIY2W6Ku9sG1Iz24CWcWE0bWvRs03YuoZF';
   var SYNC_KEY = 'beiji_sync_v1';
-  var APP_VERSION = '2026.08.22a';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
+  var APP_VERSION = '2026.08.22b';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
   var cloudSha = null;        // 云端当前文件 sha（轮询判断是否变更）
   var cloudCardCount = 0;     // 云端当前卡片数（用于防“空覆盖”）
   var syncTimer = null;       // 实时同步轮询定时器
@@ -443,6 +444,29 @@
     syncTimer = setInterval(syncPull, 90000); // 90s 轮询一次（仅比对 sha，极轻量）
     window.addEventListener('focus', syncPull);
     document.addEventListener('visibilitychange', function () { if (!document.hidden) syncPull(); });
+  }
+  // 进入软件后，后台静默把云端最新数据拉回来合并：不阻塞界面，云端慢/连不上也不影响使用
+  function reconcileCloud() {
+    if (MODE !== 'github' || !currentAccount) return;
+    var c = ghCfg();
+    if (!c || !c.token || !c.user || !c.repo || !c.account) return;
+    // 手机流量优化：5 分钟内刚成功同步过，跳过本次整包拉取（90s 轮询仍保证近实时）
+    try {
+      var last = JSON.parse(localStorage.getItem(SYNC_KEY) || 'null');
+      if (last && last.ok && (Date.now() - (last.at || 0)) < 5 * 60 * 1000) return;
+    } catch (e) {}
+    setSyncStatus(true, '正在与云端同步…'); renderSyncStatus();
+    ghLoad({ silent: true }).then(function (cloud) {
+      if (!cloud || !cloud.cards || !cloud.cards.length) {
+        if ((state.cards || []).length) saveData(state);   // 本地有、云端空 → 把本地推上去
+        return;
+      }
+      var before = state.cards.length;
+      mergeCloudIntoState(cloud);
+      if (state.cards.length !== before) { save(); }       // 合并后有变化才落盘，省一次上传
+      renderSyncStatus();
+      if (view !== 'review' && view !== 'exam') render();
+    }).catch(function () { /* 保持本机数据，下次再试 */ });
   }
   function manualSync() {
     if (MODE !== 'github' || !currentAccount) { toast('当前不是云端模式'); return; }
@@ -761,8 +785,10 @@
     if (subEl) subEl.textContent = '';
   }
   function enterApp(d) {
+   try {
     state = d || emptyState();
     state.cards = (state.cards || []).map(normalizeCard);
+    cloudCardCount = (state.cards || []).length;  // 以本机缓存为基线，避免首拉云端前误触发“空覆盖”
     state.checkins = state.checkins || [];
     state.theme = state.theme || 'mint';
     state.ai = state.ai || { url: '', key: '', model: 'gpt-4o-mini' };
@@ -780,6 +806,13 @@
     }
     renderTabbar();
     show('add');
+   } catch (e) {
+    // 极端情况（如云端数据损坏）也绝不白屏：回退到空状态让用户至少能用录入
+    try { console.error('enterApp error', e); } catch (x) {}
+    state = emptyState();
+    renderTabbar();
+    show('add');
+   }
   }
 
   function doAuth(kind) {
@@ -856,7 +889,7 @@
     try { localStorage.setItem(AUTO_KEY, u); } catch (e) {}   // 记住登录，下次自动进
     syncGhAccount();
     authMsg('');
-    loadData().then(enterApp);
+    enterApp(localCacheLoad()); reconcileCloud();
   }
   function localLogin() {
     var u = val('au').trim(), p = val('ap');
@@ -870,14 +903,15 @@
     try { localStorage.setItem(AUTO_KEY, la.account); } catch (e) {}  // 记住登录，下次自动进
     syncGhAccount();
     authMsg('');
-    loadData().then(enterApp);
+    enterApp(localCacheLoad()); reconcileCloud();
   }
   // 自动登录：跳过密码，直接按账号从存储（云端/本地）载入数据进入
   function localSilentLogin(account) {
     currentAccount = account;
     syncGhAccount();
     authMsg('');
-    loadData().then(enterApp);
+    // 关键提速：先用本机缓存（毫秒级）立刻进入，绝不干等云端；云端在后台静默拉取合并
+    enterApp(localCacheLoad()); reconcileCloud();
   }
   function doLogout() {
     session = null; currentAccount = null;
