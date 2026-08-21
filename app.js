@@ -59,6 +59,8 @@
     for (var i = 0; i < pwd.length; i++) { h ^= pwd.charCodeAt(i); h = (h * 0x01000193) >>> 0; }
     return ('00000000' + h.toString(16)).slice(-8) + ':' + (salt ? salt.length : 0);
   }
+  // 账号必须是手机号：11 位、1 开头、第二位 3-9（中国大陆手机号规则，待核具体号段）
+  function isPhone(s) { return /^1[3-9]\d{9}$/.test(s); }
   // 本机缓存读取（云端同步时的离线兜底）：优先当前账号键，其次旧版单人键
   function localCacheLoad() {
     try {
@@ -81,7 +83,7 @@
 
   /* ---------- 工具 ---------- */
   function emptyState() {
-    return { cards: [], checkins: [], theme: 'mint-rabbit', ai: { url: '', key: '', model: 'gpt-4o-mini' }, bookOrder: [], reviewOrder: 'seq', dailyGoal: { review: 0, exam: 0 } };
+    return { cards: [], checkins: [], theme: 'mint-rabbit', ai: { url: '', key: '', model: 'gpt-4o-mini' }, bookOrder: [], reviewOrder: 'seq', dailyGoal: { review: 0, exam: 0 }, countdowns: [] };
   }
   function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
   function pad(n) { return n < 10 ? '0' + n : '' + n; }
@@ -296,11 +298,35 @@
     state.cards.forEach(function (c) { if (isToday(c.lastExam)) n++; });
     return n;
   }
-  function goalOptionsHtml(current) {
-    var opts = [0, 10, 20, 30, 50, 80, 100];
-    return opts.map(function (v) {
-      return '<option value="' + v + '"' + (current === v ? ' selected' : '') + '>' + (v === 0 ? '全部卡片' : '今天 ' + v + ' 个') + '</option>';
+  // 目标量：可自由输入任意数字（不再限定整十数），留空或点“全部”=不限量
+  function goalControlHtml(current, act) {
+    return '<div class="goal-ctl">' +
+      '<input type="number" min="1" inputmode="numeric" class="goal-input" data-act="' + act + '" value="' + (current ? current : '') + '" placeholder="填数量（如 25）">' +
+      '<button class="btn small ghost" data-act="goal-all" data-arg="' + act + '">全部</button>' +
+      '</div>';
+  }
+  // 备考倒计时条（显示在背诵 / 模拟考页顶部）
+  function countdownBarHtml() {
+    var cds = state.countdowns || [];
+    if (!cds.length) return '';
+    var now = Date.now();
+    var chips = cds.map(function (cd) {
+      var ts = new Date(cd.date + 'T00:00:00').getTime();
+      var days = Math.ceil((ts - now) / DAY);
+      var txt = days > 0 ? ('还有 ' + days + ' 天') : (days === 0 ? '就是今天！冲！' : ('已结束 ' + (-days) + ' 天'));
+      return '<div class="cd-chip"><span class="cd-name">' + esc(cd.name) + '</span><span class="cd-days">' + txt + '</span></div>';
     }).join('');
+    return '<div class="cdbar">' + chips + '</div>';
+  }
+  var FINISH_REVIEW = ['今日目标达成，你真的在为上岸蓄力！', '今天这一遍，记住的就是自己的。', '任务清零，心里踏实，明天继续。', '坚持的样子，就是上岸的样子。'];
+  function finishEncouragement() { return FINISH_REVIEW[Math.floor(Math.random() * FINISH_REVIEW.length)]; }
+  function examResultText(score, total) {
+    if (!total) return '完成啦，给自己鼓个掌。';
+    var p = score / total;
+    if (p >= 0.9) return '稳如老狗！这波知识已经刻进 DNA。';
+    if (p >= 0.7) return '不错，短板已经露出来了，精准补！';
+    if (p >= 0.5) return '一半以上，剩下的就是你的提分空间。';
+    return '错题是宝藏，把它们一个个收拾掉，你就赢了。';
   }
   // Fisher-Yates 洗牌（随机背诵用）
   function shuffle(a) {
@@ -412,6 +438,7 @@
     state.bookOrder = state.bookOrder || [];
     state.reviewOrder = state.reviewOrder || 'seq';
     state.dailyGoal = state.dailyGoal || { review: 0, exam: 0 };
+    state.countdowns = state.countdowns || [];
     applyTheme();
     if (authEl) { authEl.classList.remove('show'); authEl.classList.add('hidden'); }
     if (userbarEl) {
@@ -488,7 +515,8 @@
   }
   function localSetup() {
     var u = val('au').trim(), p = val('ap');
-    if (!u) { authMsg('请填写账号名'); return; }
+    if (!u) { authMsg('请填写手机号'); return; }
+    if (!isPhone(u)) { authMsg('账号须为手机号（11 位，1 开头）'); return; }
     if (p.length < 6) { authMsg('密码至少 6 位'); return; }
     localAuthSet(u, hashPwd(p, u));
     currentAccount = u;
@@ -499,7 +527,8 @@
   }
   function localLogin() {
     var u = val('au').trim(), p = val('ap');
-    if (!u || !p) { authMsg('账号和密码都要填'); return; }
+    if (!u || !p) { authMsg('手机号和密码都要填'); return; }
+    if (!isPhone(u)) { authMsg('账号须为手机号（11 位，1 开头）'); return; }
     var la = localAuthGet();
     if (!la) { showLocalSetup(); return; }
     if (u !== la.account) { authMsg('账号不存在'); return; }
@@ -617,9 +646,22 @@
     var goal = (state.dailyGoal && state.dailyGoal.review) || 0;
     var done = todayReviewedCount();
     var progressTxt = goal > 0 ? '今日进度 ' + done + ' / ' + goal + ' 🌱' : '今日已背 ' + done + ' 张 🌱';
+    // 当日目标已达成：弹出庆祝 + 鼓励，不再抽新卡（想继续可点“不限量”）
+    if (goal > 0 && done >= goal) {
+      viewEl.innerHTML = countdownBarHtml() +
+        '<div class="card center"><div class="big">🏆</div>' +
+        '<p>今日目标已完成！</p>' +
+        '<p class="enc-text-lg">' + finishEncouragement() + '</p>' +
+        '<p class="hint">今日已背 ' + done + ' 张，想继续就点下面</p>' +
+        '<button class="btn primary" data-act="goal-unlim">继续背（不限量）</button></div>';
+      return;
+    }
     if (!reviewQueue || reviewQueue.length === 0) {
-      viewEl.innerHTML = '<div class="card center"><div class="big">🎉</div>' +
-        '<p>当前没有待复习的卡片。</p>' +
+      var celebrate = (goal > 0 && done >= goal);
+      viewEl.innerHTML = countdownBarHtml() +
+        '<div class="card center"><div class="big">' + (celebrate ? '🏆' : '🎉') + '</div>' +
+        '<p>' + (celebrate ? '今日目标已完成！' : '当前没有待复习的卡片。') + '</p>' +
+        (celebrate ? '<p class="enc-text-lg">' + finishEncouragement() + '</p>' : '') +
         '<p class="hint">' + progressTxt + '</p>' +
         (state.cards.length ? '<button class="btn primary" data-act="review-all">' + (goal > 0 ? '今天再背 ' + goal + ' 个' : '复习全部卡片') + '</button>' : '') + '</div>';
       return;
@@ -633,8 +675,9 @@
       nextHint = '<p class="hint">' + lastTxt + ' · 熟悉度 ' + familiarity(card) + '%</p>';
     }
     viewEl.innerHTML =
+      countdownBarHtml() +
       '<div class="goalbar"><span class="goaltxt">' + progressTxt + '</span>' +
-      '<select class="goal-select" data-act="rev-goal">' + goalOptionsHtml(goal) + '</select></div>' +
+      goalControlHtml(goal, 'rev-goal') + '</div>' +
       '<div class="encour">' + randomEncouragement('review') + '</div>' +
       '<div class="rorder"><span class="rolbl">背诵方式</span>' +
       '<button class="btn small ' + (order === 'seq' ? 'on' : '') + '" data-act="rev-order" data-arg="seq">顺序</button>' +
@@ -658,18 +701,22 @@
       var goal = (state.dailyGoal && state.dailyGoal.exam) || 0;
       var done = todayExamCount();
       var progressTxt = goal > 0 ? '今日已测 ' + done + ' / ' + goal + ' 📝' : '今日已测 ' + done + ' 题 📝';
-      viewEl.innerHTML = '<div class="encour">' + randomEncouragement('exam') + '</div>' +
+      viewEl.innerHTML = countdownBarHtml() +
+        '<div class="encour">' + randomEncouragement('exam') + '</div>' +
         '<div class="goalbar"><span class="goaltxt">' + progressTxt + '</span>' +
-        '<select class="goal-select" data-act="exam-goal">' + goalOptionsHtml(goal) + '</select></div>' +
+        goalControlHtml(goal, 'exam-goal') + '</div>' +
         '<div class="card center"><p>从你的卡片里随机抽题自测，<b>题量你说了算</b>。</p>' +
-        '<p class="hint">当前共 ' + state.cards.length + ' 张卡片，选择「全部卡片」则全部考到。</p>' +
+        '<p class="hint">当前共 ' + state.cards.length + ' 张卡片，留空或点「全部」则全考。</p>' +
         '<button class="btn primary" data-act="exam-start">开始模拟考</button></div>';
       return;
     }
     if (exam.idx >= exam.queue.length) {
-      var score = exam.queue.length ? Math.round(exam.score / exam.queue.length * 100) : 0;
-      viewEl.innerHTML = '<div class="card center"><div class="big">' + score + ' 分</div>' +
-        '<p>答对 ' + exam.score + ' / ' + exam.queue.length + '</p>' +
+      var total = exam.queue.length;
+      var score = total ? Math.round(exam.score / total * 100) : 0;
+      viewEl.innerHTML = countdownBarHtml() +
+        '<div class="card center"><div class="big">' + score + ' 分</div>' +
+        '<p>答对 ' + exam.score + ' / ' + total + '</p>' +
+        '<p class="enc-text-lg">' + examResultText(exam.score, total) + '</p>' +
         '<button class="btn primary" data-act="exam-restart">再来一次</button></div>';
       return;
     }
@@ -786,6 +833,14 @@
     save(); closeImportModal(); toast('已保存 ✓'); render();
   }
 
+  function cdListHtml() {
+    var cds = state.countdowns || [];
+    if (!cds.length) return '<p class="hint">还没有倒计时，添加一个，每天打开都能看到目标越来越近。</p>';
+    return cds.map(function (cd, i) {
+      return '<div class="cdrow"><span>' + esc(cd.name) + ' · ' + esc(cd.date) + '</span>' +
+        '<button class="btn small ghost" data-act="cd-del" data-arg="' + i + '">删</button></div>';
+    }).join('');
+  }
   function viewMine() {
     var gc = ghCfg() || {};
     var total = state.cards.length;
@@ -823,6 +878,19 @@
       '<div><b>' + books + '</b><span>书</span></div>' +
       '<div><b>' + due + '</b><span>待复习</span></div>' +
       '<div><b>' + state.checkins.length + '</b><span>签到</span></div></div>' +
+      '<div class="card"><div class="lbl">备考倒计时（显示在背诵 / 模拟考页顶部）</div>' +
+      '<div id="cd-list">' + cdListHtml() + '</div>' +
+      '<label class="lbl">新增倒计时</label>' +
+      '<input id="cd-name" class="inp" placeholder="名称，如：考研 / 考公 / 高考">' +
+      '<input id="cd-date" class="inp" type="date" style="margin-top:8px">' +
+      '<div class="cd-presets" style="margin:8px 0 4px;display:flex;gap:8px;flex-wrap:wrap;">' +
+      '<button class="btn small" data-act="cd-preset" data-arg="考研">考研</button>' +
+      '<button class="btn small" data-act="cd-preset" data-arg="考公">考公</button>' +
+      '<button class="btn small" data-act="cd-preset" data-arg="高考">高考</button>' +
+      '</div>' +
+      '<p class="hint">预设日期为常规时间（待核），请按官方公布核对后保存。</p>' +
+      '<button class="btn primary" data-act="cd-add">添加倒计时</button>' +
+      '</div>' +
       '<div class="card"><div class="lbl">复习分布（按下次复习时间）</div>' + dist + '</div>' +
       '<div class="card"><div class="lbl">遗忘曲线（越往右越容易忘，点「认识」会推远复习点）</div>' + curve + '</div>' +
       '<div class="card"><div class="lbl">主题（点一下立刻换，选择会记住）</div><div class="themes">' + th + '</div></div>' +
@@ -954,6 +1022,40 @@
     if (act === 'cancel-edit') { closeImportModal(); return; }
     // 复习顺序：顺序 / 随机 / 薄弱优先
     if (act === 'rev-order') { state.reviewOrder = arg; applyReviewOrder(); render(); return; }
+
+    // 目标量：自定义任意数字后点“全部”即不限量
+    if (act === 'goal-all') {
+      state.dailyGoal = state.dailyGoal || { review: 0, exam: 0 };
+      if (arg === 'rev-goal') { state.dailyGoal.review = 0; reviewSource = null; reviewQueue = null; }
+      else state.dailyGoal.exam = 0;
+      save(); render(); return;
+    }
+    // 目标达成后想继续：切到不限量，重排全部卡片
+    if (act === 'goal-unlim') {
+      state.dailyGoal = state.dailyGoal || { review: 0, exam: 0 };
+      state.dailyGoal.review = 0; reviewQueue = null; reviewSource = state.cards.slice();
+      applyReviewOrder(); render(); return;
+    }
+    // 备考倒计时：预设快捷填入 / 添加 / 删除
+    if (act === 'cd-preset') {
+      var preset = { '考研': '2026-12-19', '考公': '2026-11-28', '高考': '2027-06-07' };
+      if ($('cd-name')) $('cd-name').value = arg;
+      if ($('cd-date')) $('cd-date').value = preset[arg] || '';
+      toast('已填入「' + arg + '」预设，日期可在保存前修改（预设为常规时间，待核）');
+      return;
+    }
+    if (act === 'cd-add') {
+      var nm = val('cd-name').trim(), dt = val('cd-date').trim();
+      if (!nm || !dt) { toast('请填写名称和日期'); return; }
+      state.countdowns = state.countdowns || [];
+      state.countdowns.push({ name: nm, date: dt });
+      save(); toast('已添加倒计时 ✓'); render(); return;
+    }
+    if (act === 'cd-del') {
+      var ci = parseInt(arg, 10);
+      if (state.countdowns && state.countdowns[ci]) { state.countdowns.splice(ci, 1); save(); render(); }
+      return;
+    }
 
     if (act === 'add') {
       var book = val('f-book').trim();
