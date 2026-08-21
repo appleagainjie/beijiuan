@@ -92,6 +92,8 @@
     if (c.interval == null) c.interval = 0;
     if (c.due == null) c.due = 0;
     if (!c.id) c.id = uid();
+    if (!Array.isArray(c.points)) c.points = [];
+    if (c.cloze == null) c.cloze = false;
     return c;
   }
   function newCard(book, q, a) {
@@ -465,6 +467,21 @@
     if (finp) finp.onchange = function (ev) { if (ev.target.files && ev.target.files[0]) startImport(ev.target.files[0]); };
   }
 
+  // 复习/模考共用的卡片渲染：挖空卡渲染 N 个输入框，显示答案后回填正确答案
+  function flipCard(card, revealed) {
+    if (card.cloze && card.points && card.points.length) {
+      var inputs = card.points.map(function (p, i) {
+        return '<div class="cl"><span class="cn">' + circled(i + 1) + '</span>' +
+          '<input class="clin" value="' + (revealed ? esc(p) : '') + '" placeholder="回想第 ' + (i + 1) + ' 点…" ' + (revealed ? 'readonly' : '') + '></div>';
+      }).join('');
+      return '<div class="card flip"><div class="q">' + esc(card.q) + '</div>' +
+        '<div class="cloze">' + inputs + '</div>' +
+        (revealed ? '<div class="a">' + esc(card.a || '') + '</div>' : '') + '</div>';
+    }
+    return '<div class="card flip"><div class="q">' + esc(card.q) + '</div>' +
+      (revealed ? '<div class="a">' + esc(card.a || '(无答案)') + '</div>' : '') + '</div>';
+  }
+
   function viewReview() {
     if (!reviewQueue) reviewQueue = dueCards();
     if (!reviewQueue || reviewQueue.length === 0) {
@@ -482,8 +499,7 @@
     }
     viewEl.innerHTML =
       '<div class="prog">待复习 ' + reviewQueue.length + ' 张</div>' +
-      '<div class="card flip"><div class="q">' + esc(card.q) + '</div>' +
-      (revealed ? '<div class="a">' + esc(card.a || '(无答案)') + '</div>' : '') + '</div>' +
+      flipCard(card, revealed) +
       nextHint +
       (revealed
         ? '<div class="row3">' +
@@ -510,8 +526,7 @@
     var card = exam.queue[exam.idx];
     viewEl.innerHTML =
       '<div class="prog">第 ' + (exam.idx + 1) + ' / ' + exam.queue.length + ' 题　得分 ' + exam.score + '</div>' +
-      '<div class="card flip"><div class="q">' + esc(card.q) + '</div>' +
-      (exam.revealed ? '<div class="a">' + esc(card.a || '(无答案)') + '</div>' : '') + '</div>' +
+      flipCard(card, exam.revealed) +
       (exam.revealed
         ? '<div class="row2"><button class="btn bad" data-act="exam-wrong">答错了 ✗</button>' +
         '<button class="btn good" data-act="exam-correct">答对了 ✓</button></div>'
@@ -861,15 +876,8 @@
         r.onerror = function () { reject('文本读取失败'); };
         r.readAsText(file);
       } else if (ext === 'docx') {
-        loadScript('https://unpkg.com/mammoth@1.6.0/mammoth.browser.min.js').then(function () {
-          var r = new FileReader();
-          r.onload = function () {
-            mammoth.extractRawText({ arrayBuffer: r.result }).then(function (res) { resolve(res.value); })
-              .catch(function (e) { reject('docx 解析失败'); });
-          };
-          r.onerror = function () { reject('docx 读取失败'); };
-          r.readAsArrayBuffer(file);
-        }).catch(function (e) { reject(e); });
+        extractDocx(file).then(resolve).catch(function (e) { reject('docx 解析失败：' + e); });
+        return;
       } else if (ext === 'pdf') {
         var ver = '3.11.174';
         loadScript('https://unpkg.com/pdfjs-dist@' + ver + '/build/pdf.min.js').then(function () {
@@ -895,6 +903,68 @@
       } else { reject('不支持的格式：' + ext); }
     });
   }
+  // docx：优先用 JSZip 直接读 document.xml，把“高亮/标色”的文字标记为【重点】，
+  // 其余（含 ①②③ 序号）原样保留；任一环节失败都退回 mammoth 纯文本，保证可用。
+  function extractDocx(file) {
+    return new Promise(function (resolve, reject) {
+      var doMammoth = function () {
+        loadScript('https://unpkg.com/mammoth@1.6.0/mammoth.browser.min.js').then(function () {
+          var r = new FileReader();
+          r.onload = function () {
+            mammoth.extractRawText({ arrayBuffer: r.result }).then(function (res) { resolve(res.value); })
+              .catch(function () { reject('docx 解析失败'); });
+          };
+          r.onerror = function () { reject('docx 读取失败'); };
+          r.readAsArrayBuffer(file);
+        }).catch(function (e) { reject(e); });
+      };
+      var rich = function () {
+        if (typeof JSZip === 'undefined') { doMammoth(); return; }
+        var r = new FileReader();
+        r.onload = function () {
+          JSZip.loadAsync(r.result).then(function (zip) {
+            var f = zip.file('word/document.xml');
+            if (!f) { doMammoth(); return; }
+            f.async('string').then(function (xml) {
+              try {
+                var doc = new DOMParser().parseFromString(xml, 'text/xml');
+                var paras = doc.getElementsByTagName('w:p');
+                var out = [];
+                for (var p = 0; p < paras.length; p++) {
+                  var runs = paras[p].getElementsByTagName('w:r');
+                  var line = '';
+                  for (var rr = 0; rr < runs.length; rr++) {
+                    var run = runs[rr];
+                    var txt = '';
+                    var ts = run.getElementsByTagName('w:t');
+                    for (var tt = 0; tt < ts.length; tt++) txt += ts[tt].textContent;
+                    if (!txt) continue;
+                    line += runIsKey(run) ? '\uE000' + txt + '\uE001' : txt;
+                  }
+                  if (line.trim()) out.push(line.trim());
+                }
+                if (!out.length) { doMammoth(); return; }
+                resolve(out.join('\n'));
+              } catch (e) { doMammoth(); }
+            }).catch(function () { doMammoth(); });
+          }).catch(function () { doMammoth(); });
+        };
+        r.onerror = function () { reject('docx 读取失败'); };
+        r.readAsArrayBuffer(file);
+      };
+      if (typeof JSZip === 'undefined') {
+        loadScript('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js').then(rich).catch(doMammoth);
+      } else { rich(); }
+    });
+  }
+  function runIsKey(run) {
+    var hl = run.getElementsByTagName('w:highlight');
+    if (hl.length) { var v = hl[0].getAttribute('w:val'); if (v && v !== 'none' && v !== 'false') return true; }
+    var cols = run.getElementsByTagName('w:color');
+    if (cols.length) { var c = (cols[0].getAttribute('w:val') || '').toLowerCase(); if (c && c !== '000000' && c !== 'auto') return true; }
+    return false;
+  }
+
   function openImportModal() {
     if (!overlayEl) return;
     renderImportModal();
@@ -925,19 +995,22 @@
       '<label class="lbl">原文（可直接编辑、选中你要的部分）</label>' +
       '<textarea id="raw-text" class="raw">' + esc(importState.text) + '</textarea>' +
       '<div class="mode">' +
-      '<button class="btn small ' + (importState.mode === 'qa' ? 'on' : '') + '" data-act="parse-preview" data-arg="qa">题库模式：拆问答</button>' +
-      '<button class="btn small ' + (importState.mode === 'knowledge' ? 'on' : '') + '" data-act="parse-preview" data-arg="knowledge">知识点模式：标题+正文</button>' +
+      '<button class="btn small ' + (importState.mode === 'qa' ? 'on' : '') + '" data-act="parse-preview" data-arg="qa">题库：拆问答</button>' +
+      '<button class="btn small ' + (importState.mode === 'knowledge' ? 'on' : '') + '" data-act="parse-preview" data-arg="knowledge">知识点：标题+正文</button>' +
+      '<button class="btn small ' + (importState.mode === 'cloze' ? 'on' : '') + '" data-act="parse-preview" data-arg="cloze">挖空默写：标题+要点</button>' +
       '</div>' +
       (aiOk
         ? '<button class="btn primary" data-act="ai-parse">🤖 AI 再精修一遍（已配置）</button>'
         : '<button class="btn ghost" data-act="ai-go">🤖 想让 AI 再精修？在「我的」填接口（不填也能用）</button>') +
       '<p class="hint">✅ 已用<b>本地智能解析</b>自动识别（无需 AI、无需联网），结果在下方预览，可直接编辑校正后再导入。' +
-      (importState.mode === 'qa' ? '本次识别为：题库模式·拆问答。' : '本次识别为：知识点模式·标题+正文。') + '</p>' +
+      (importState.mode === 'qa' ? '本次识别为：题库模式·拆问答。'
+        : importState.mode === 'cloze' ? '本次识别为：挖空默写·标题 + 要点（①②③ / 高亮 / 标色 自动变填空）。'
+        : '本次识别为：知识点模式·标题+正文。') + '</p>' +
       previewHTML +
       '</div>' +
       '<div class="foot">' +
       '<button class="btn ghost" data-act="close-overlay">取消</button>' +
-      '<button class="btn primary" data-act="confirm-import" ' + (importState.preview.length ? '' : 'disabled') + '>确认导入 ' + importState.preview.length + ' 张</button>' +
+      '<button class="btn primary" data-act="confirm-import">确认导入 ' + importState.preview.length + ' 张</button>' +
       '</div>' +
       '</div>';
   }
@@ -946,7 +1019,7 @@
     var mode = importState.mode;
     if (mode === 'auto') mode = detectMode(text);
     importState.mode = mode;
-    var items = mode === 'qa' ? parseQA(text) : parseKnowledge(text);
+    var items = mode === 'qa' ? parseQA(text) : mode === 'cloze' ? parseCloze(text) : parseKnowledge(text);
     importState.preview = items;
     renderImportModal();
   }
@@ -963,14 +1036,92 @@
     if (/某.+项目|案例|根据以下|如下|背景材料|阅读材料/.test(line)) return 'case';
     return 'text';
   }
+  /* ---------- 挖空默写模式 ---------- */
+  // 把带圈/阿拉伯/中文序号的要点，或文档里被高亮、标色的重点，自动变成“填空题”
+  var CIRCLED = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳';
+  function circled(n) { return (n >= 1 && n <= 20) ? CIRCLED.charAt(n - 1) : '(' + n + ')'; }
+
+  // 按分隔标记把一行拆成若干“要点”文本
+  function splitByMarkers(line, re) {
+    var ms = [], m; re.lastIndex = 0;
+    while ((m = re.exec(line)) !== null) { ms.push(m); if (m.index === re.lastIndex) re.lastIndex++; }
+    if (!ms.length) return [];
+    var pts = [];
+    for (var k = 0; k < ms.length; k++) {
+      var start = ms[k].index + ms[k][0].length;
+      var end = (k + 1 < ms.length) ? ms[k + 1].index : line.length;
+      var seg = line.slice(start, end).replace(/^[、．.\s]+/, '').replace(/\s+$/, '');
+      if (seg) pts.push(seg);
+    }
+    return pts;
+  }
+  // 文档重点标记（由 JSZip 抓高亮/颜色时包裹：\uE000 文本 \uE001）
+  function extractKeySegments(text) {
+    var segs = [], re = /\uE000([\s\S]*?)\uE001/g, m;
+    while ((m = re.exec(text)) !== null) { var s = m[1].trim(); if (s) segs.push(s); }
+    return segs;
+  }
+  // 识别一行里的若干要点（支持 ①②③、1. 2. 3.、(1)(2)、一二三、以及高亮段）
+  function countPoints(line) {
+    var pts;
+    pts = splitByMarkers(line, /[①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳]/g); if (pts.length >= 2) return pts;
+    pts = splitByMarkers(line, /(?:\d+)[.．、]/g); if (pts.length >= 2) return pts;
+    pts = splitByMarkers(line, /（\d+）|(\(\d+\))/g); if (pts.length >= 2) return pts;
+    pts = splitByMarkers(line, /[一二三四五六七八九十]+[、．.]/g); if (pts.length >= 2) return pts;
+    pts = extractKeySegments(line); if (pts.length >= 1) return pts;
+    return [];
+  }
+  // 往前找最近的“标题行”作为这张挖空卡的题干
+  function findHeading(paras, i) {
+    var headPat = /^\d+[.、]|^[一二三四五六七八九十]+[、．.]|^（[一二三四五六七八九十]+）/;
+    var tailPat = /(特征|含义|因素|理论|模型|观|论|内容|指标|途径|原因|条件|关系|概念|辨析|措施|定义|阶段|类型|方式|表现|实质|内容)$/;
+    for (var j = i - 1; j >= 0; j--) {
+      var s = paras[j];
+      if (countPoints(s).length >= 2) continue;   // 跳过要点行本身
+      if (extractKeySegments(s).length) continue;
+      if (headPat.test(s) || tailPat.test(s) || s.length <= 22) return s;
+    }
+    return '';
+  }
+  function makeCloze(heading, pts) {
+    var h = heading ? heading + '\n' : '';
+    var q = h + '（共 ' + pts.length + ' 个要点，先自己默写，再点「显示答案」核对）';
+    var a = h + pts.map(function (p, idx) { return circled(idx + 1) + p; }).join('');
+    return { q: q, a: a, cloze: true, points: pts };
+  }
+  function parseCloze(text) {
+    // 去掉段落开头的项目符号字形，按空行/换行切段
+    var paras = text.replace(/\r/g, '').split(/\n+/).map(function (s) {
+      return s.replace(/^[•·▪\-–—\s]+/, '').trim();
+    }).filter(Boolean);
+    var items = [];
+    for (var i = 0; i < paras.length; i++) {
+      var line = paras[i];
+      var pts = countPoints(line);
+      if (pts.length < 2) pts = extractKeySegments(line).length ? extractKeySegments(line) : [];
+      if (pts.length >= 2) {
+        items.push(makeCloze(findHeading(paras, i), pts));
+      } else if (pts.length === 1) {
+        // 单行单要点：若附近有标题，也成一张卡
+        var hd = findHeading(paras, i);
+        if (hd) items.push(makeCloze(hd, pts));
+      }
+    }
+    return items;
+  }
+
   function detectMode(text) {
-    var qa = 0, know = 0;
+    var qa = 0, know = 0, cloze = 0;
+    if (/[①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳]/.test(text)) cloze += 3;
+    if ((text.match(/（\d+）/g) || []).length >= 2) cloze += 2;
+    if ((text.match(/\([1-9]\d?\)/g) || []).length >= 2) cloze += 2;
     if (/答案[：:\s]/.test(text)) qa += 3;
     if (/[A-Da-d][\.．、]/.test(text)) qa += 2;
     if (/\d+[\.．、].+[？?？]/.test(text)) qa += 2;
     if (/问[：:]/.test(text)) qa += 1;
     if (/^#{1,6}\s/m.test(text)) know += 3;
     if (/^([一二三四五六七八九十]+)[、．.]\s*\S+$/m.test(text)) know += 2;
+    if (cloze >= 3) return 'cloze';
     return qa >= know ? 'qa' : 'knowledge';
   }
   function parseQA(text) {
@@ -1069,11 +1220,23 @@
   }
   function confirmImport() {
     var book = val('imp-book').trim(); var n = 0;
-    importState.preview.forEach(function (it) {
-      if (!it.q) return;
-      state.cards.push(newCard(book, it.q.trim(), it.a.trim())); n++;
-    });
-    if (n) { save(); toast('已导入 ' + n + ' 张卡片'); }
+    if (!importState.preview.length) {
+      // 兜底：识别不出结构时，把原文整段作为一张笔记卡，保证“下一步”永远能走
+      var raw = (importState.text || '').trim();
+      if (raw) {
+        var fc = newCard(book, '导入的整段笔记', raw);
+        state.cards.push(fc); n = 1;
+        save(); toast('未识别到结构，已整段导入 1 张（可在书库里手动拆分）');
+      } else { toast('没有可导入的内容'); closeImportModal(); render(); return; }
+    } else {
+      importState.preview.forEach(function (it) {
+        if (!it.q) return;
+        var c = newCard(book, it.q.trim(), it.a.trim());
+        if (it.cloze) { c.cloze = true; c.points = it.points || []; }
+        state.cards.push(c); n++;
+      });
+      if (n) { save(); toast('已导入 ' + n + ' 张卡片'); }
+    }
     closeImportModal(); render();
   }
 
