@@ -79,6 +79,13 @@ body{
 #toast{position:fixed;left:50%;bottom:90px;transform:translateX(-50%) translateY(20px);background:rgba(0,0,0,.82);color:#fff;padding:10px 18px;border-radius:20px;font-size:14px;opacity:0;pointer-events:none;transition:.25s;z-index:99;max-width:80%;text-align:center;}
 #toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
 
+/* 加载中遮罩 */
+#loading{position:fixed;inset:0;background:rgba(255,255,255,.88);z-index:100;display:flex;align-items:center;justify-content:center;flex-direction:column;opacity:0;pointer-events:none;transition:opacity .2s;}
+#loading.show{opacity:1;pointer-events:auto;}
+#loading .spin{width:36px;height:36px;border:3px solid var(--border);border-top-color:var(--primary);border-radius:50%;animation:spin 1s linear infinite;}
+#loading .msg{margin-top:12px;color:var(--muted);font-size:14px;}
+@keyframes spin{to{transform:rotate(360deg);}}
+
 /* 文件导入弹层 */
 .hidden{display:none!important;}
 #overlay{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:50;display:flex;align-items:flex-end;justify-content:center;opacity:0;pointer-events:none;transition:.2s;}

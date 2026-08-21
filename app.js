@@ -30,10 +30,18 @@
   var viewEl, tabEl, subEl, overlayEl, authEl, userbarEl, unameEl, authMsgEl;
   var importState = { text: '', mode: 'qa', preview: [], book: '' };
   var saveTimer = null;
+  var loadingEl = null;
   var GITHUB_KEY = 'beiji_gh';
   function ghCfg() { try { return JSON.parse(localStorage.getItem(GITHUB_KEY) || 'null'); } catch (e) { return null; } }
   function setGhCfg(c) { try { localStorage.setItem(GITHUB_KEY, JSON.stringify(c)); } catch (e) {} }
-  function utf8ToBase64(str) { var b = new TextEncoder().encode(str), s = ''; for (var i = 0; i < b.length; i++) s += String.fromCharCode(b[i]); return btoa(s); }
+  function utf8ToBase64(str) {
+    try { return btoa(unescape(encodeURIComponent(str))); }
+    catch (e) {
+      var b = new TextEncoder().encode(str), s = '', i = 0, n = b.length;
+      for (; i < n; i++) s += String.fromCharCode(b[i]);
+      return btoa(s);
+    }
+  }
   function base64ToUtf8(b64) { var bin = atob(b64), bytes = new Uint8Array(bin.length); for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i); return new TextDecoder().decode(bytes); }
 
   /* ---------- 本机登录（local 模式，单账号、数据隔离） ---------- */
@@ -145,11 +153,22 @@
         return j;
       });
     }
+    // 统一只序列化一次，避免大文件重复 stringify
+    var json = '';
+    try { json = JSON.stringify(d); } catch (e) {}
     if (MODE === 'github') {
-      try { localStorage.setItem(dataKey(currentAccount), JSON.stringify(d)); } catch (e) {}
-      return ghSave(d);
+      // GitHub 模式以仓库文件为权威存储；localStorage 只是离线缓存。
+      // 如果数据太大，跳过本地缓存避免主线程卡死和超出配额。
+      if (json && json.length <= 800000) {
+        try { localStorage.setItem(dataKey(currentAccount), json); } catch (e) {}
+      } else if (json) {
+        try { localStorage.setItem(dataKey(currentAccount) + '_meta', JSON.stringify({ savedAt: Date.now(), size: json.length })); } catch (e) {}
+      }
+      return ghSave(d, json);
     }
-    try { localStorage.setItem(dataKey(currentAccount), JSON.stringify(d)); } catch (e) { toast('保存失败：存储可能已满'); }
+    if (json) {
+      try { localStorage.setItem(dataKey(currentAccount), json); } catch (e) { toast('保存失败：存储可能已满'); }
+    }
     return Promise.resolve({});
   }
   function loadData() {
@@ -178,14 +197,14 @@
     } catch (e) {}
     return Promise.resolve(emptyState());
   }
-  function ghSave(d) {
+  function ghSave(d, prejson) {
     var c = ghCfg();
     if (!c || !c.token || !c.user || !c.repo || !c.account) return Promise.resolve({});
     var sha;
     var path = 'data/' + encodeURIComponent(c.account) + '.json';
     var api = 'https://api.github.com/repos/' + c.user + '/' + c.repo + '/contents/' + path;
     var headers = { 'Authorization': 'token ' + c.token, 'Accept': 'application/vnd.github+json' };
-    var content = utf8ToBase64(JSON.stringify(d));
+    var content = utf8ToBase64(prejson || JSON.stringify(d));
     return fetch(api, { headers: headers })
       .then(function (r) { if (r.status === 200) return r.json().then(function (j) { sha = j.sha; }); return null; })
       .then(function () {
@@ -1226,18 +1245,29 @@
       if (raw) {
         var fc = newCard(book, '导入的整段笔记', raw);
         state.cards.push(fc); n = 1;
+        closeImportModal(); render();
         save(); toast('未识别到结构，已整段导入 1 张（可在书库里手动拆分）');
       } else { toast('没有可导入的内容'); closeImportModal(); render(); return; }
-    } else {
-      importState.preview.forEach(function (it) {
-        if (!it.q) return;
-        var c = newCard(book, it.q.trim(), it.a.trim());
-        if (it.cloze) { c.cloze = true; c.points = it.points || []; }
-        state.cards.push(c); n++;
-      });
-      if (n) { save(); toast('已导入 ' + n + ' 张卡片'); }
+      return;
     }
-    closeImportModal(); render();
+    // 批量导入：先关闭弹窗并显示加载，避免 94 张大段文本同步保存卡死主线程
+    importState.preview.forEach(function (it) {
+      if (!it.q) return;
+      var c = newCard(book, it.q.trim(), it.a.trim());
+      if (it.cloze) { c.cloze = true; c.points = it.points || []; }
+      state.cards.push(c); n++;
+    });
+    closeImportModal();
+    showLoading('正在保存 ' + n + ' 张卡片…');
+    // 把重活推到下一帧，让加载动画先画出来；直接调用 saveData 不走 300ms 防抖
+    setTimeout(function () {
+      state.cards.forEach(function (c) { delete c._revealed; });
+      saveData(state).then(function () {
+        render(); hideLoading(); if (n) toast('已导入 ' + n + ' 张卡片');
+      }).catch(function () {
+        render(); hideLoading(); toast('导入完成，但云端备份失败');
+      });
+    }, 40);
   }
 
   /* ---------- 备份 ---------- */
@@ -1279,6 +1309,18 @@
     clearTimeout(toastEl._t); toastEl._t = setTimeout(function () { toastEl.classList.remove('show'); }, 1800);
   }
   var toastEl = null;
+
+  /* ---------- 加载中遮罩 ---------- */
+  function showLoading(msg) {
+    if (!loadingEl) {
+      loadingEl = document.createElement('div'); loadingEl.id = 'loading';
+      loadingEl.innerHTML = '<div class="spin"></div><div class="msg"></div>';
+      document.body.appendChild(loadingEl);
+    }
+    loadingEl.querySelector('.msg').textContent = msg || '处理中…';
+    loadingEl.classList.add('show');
+  }
+  function hideLoading() { if (loadingEl) loadingEl.classList.remove('show'); }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
