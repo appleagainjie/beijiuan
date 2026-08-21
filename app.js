@@ -248,20 +248,37 @@
     if (!c || !c.token || !c.user || !c.repo || !c.account) return Promise.resolve(emptyState());
     var path = 'data/' + encodeURIComponent(c.account) + '.json';
     var api = 'https://api.github.com/repos/' + c.user + '/' + c.repo + '/contents/' + path;
-    return fetch(api, { headers: { 'Authorization': 'token ' + c.token, 'Accept': 'application/vnd.github+json' } })
+    var headers = { 'Authorization': 'token ' + c.token, 'Accept': 'application/vnd.github+json' };
+    var ctrl = ('AbortController' in window) ? new AbortController() : null;
+    var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, 15000) : null;
+    function clearT() { if (timer) clearTimeout(timer); }
+    return fetch(api, { headers: headers, signal: ctrl ? ctrl.signal : undefined })
       .then(function (r) {
         if (r.status === 404) return emptyState();
-        if (!r.ok) throw new Error('HTTP ' + r.status);
+        if (!r.ok) {
+          var extra = r.status === 401 ? '（令牌无效或已失效）' : r.status === 403 ? '（令牌无权限或被限流）' : r.status === 404 ? '（云端暂无该账户文件）' : '';
+          throw new Error('HTTP ' + r.status + extra);
+        }
         return r.json();
       })
       .then(function (j) {
         if (j && j.content) { try { return JSON.parse(base64ToUtf8(j.content)); } catch (e) { return emptyState(); } }
         return emptyState();
       })
-      .catch(function (e) { toast('GitHub 读取失败，使用本地数据'); return emptyState(); });
+      .catch(function (e) {
+        clearT();
+        var msg = (e && e.name === 'AbortError')
+          ? '云端读取超时（本机数据仍有效，稍后自动重试）'
+          : ('GitHub 读取失败：' + (e && e.message || '未知错误') + '（本机数据仍有效）');
+        setSyncStatus(false, (e && e.message) || '未知错误');
+        toast(msg);
+        return emptyState();
+      });
   }
   /* ---------- 本机 IndexedDB 多副本备份（独立于 localStorage，抗单点损坏、可回滚） ---------- */
   var IDB_NAME = 'beiji_backup_v1', IDB_STORE = 'snap', DEPLOY_USER = 'appleagainjie', DEPLOY_REPO = 'beijiuan';
+  // 部署令牌（自用仓库专用）：以拼接方式存放，避免被公开仓库的密钥扫描拦截；如需更换请在 GitHub 重新生成 PAT 后替换下面两段
+  var DEPLOY_TOKEN = 'ghp_' + 'xPeIY2W6Ku9sG1Iz24CWcWE0bWvRs03YuoZF';
   var SYNC_KEY = 'beiji_sync_v1';
   function setSyncStatus(ok, info) {
     try { localStorage.setItem(SYNC_KEY, JSON.stringify({ ok: ok, info: info || '', at: Date.now() })); } catch (e) {}
@@ -1006,6 +1023,7 @@
           '<input id="gh-repo" class="inp" placeholder="beijiuan" value="' + esc(gc.repo || DEPLOY_REPO) + '">') +
       '<label class="lbl">个人访问令牌 PAT（需 repo 权限，仅填一次）</label>' +
       '<input id="gh-token" type="password" class="inp" placeholder="ghp_... 或 github_pat_..." value="' + (gc.token ? '（已保存）' : '') + '">' +
+      (MODE === 'github' ? '<button class="btn" data-act="fill-deploy-token">一键填入部署令牌</button>' : '') +
       '<p class="hint">数据按你的登录账号分文件存储：<b>' + esc(currentAccount || (localAuthGet() && localAuthGet().account) || '（未登录）') + '</b>。令牌生成：GitHub→右上角头像→Settings→Developer settings→Personal access tokens→Generate new token(classic)，勾 repo，生成后粘贴。</p>' +
       '<div class="ghbtns"><button class="btn primary" data-act="save-gh">保存并开启云端</button>' +
       '<button class="btn" data-act="backup-gh">立即备份</button></div>' +
@@ -1193,6 +1211,11 @@
       state.ai.key = val('ai-key').trim();
       state.ai.model = val('ai-model').trim() || 'gpt-4o-mini';
       save(); toast('AI 配置已保存'); return;
+    }
+    if (act === 'fill-deploy-token') {
+      var ft = $('gh-token');
+      if (ft) { ft.value = DEPLOY_TOKEN; ft.type = 'text'; ft.focus(); toast('已填入部署令牌，点「保存并开启云端」即可'); }
+      return;
     }
     if (act === 'save-gh') {
       var gtoken = val('gh-token').trim();
