@@ -81,7 +81,7 @@
 
   /* ---------- 工具 ---------- */
   function emptyState() {
-    return { cards: [], checkins: [], theme: 'mint', ai: { url: '', key: '', model: 'gpt-4o-mini' }, bookOrder: [] };
+    return { cards: [], checkins: [], theme: 'mint-rabbit', ai: { url: '', key: '', model: 'gpt-4o-mini' }, bookOrder: [], reviewOrder: 'seq', dailyGoal: { review: 0, exam: 0 } };
   }
   function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
   function pad(n) { return n < 10 ? '0' + n : '' + n; }
@@ -280,7 +280,27 @@
     card.ef = ef; card.reps = reps; card.interval = interval;
     card.due = Date.now() + interval * DAY;
     card.lastGrade = q;
+    card.lastReview = Date.now();
     return card;
+  }
+  function isToday(ts) {
+    return !!ts && todayStr() === new Date(ts).toLocaleDateString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' }).replace(/\//g, '-');
+  }
+  function todayReviewedCount() {
+    var n = 0;
+    state.cards.forEach(function (c) { if (isToday(c.lastReview)) n++; });
+    return n;
+  }
+  function todayExamCount() {
+    var n = 0;
+    state.cards.forEach(function (c) { if (isToday(c.lastExam)) n++; });
+    return n;
+  }
+  function goalOptionsHtml(current) {
+    var opts = [0, 10, 20, 30, 50, 80, 100];
+    return opts.map(function (v) {
+      return '<option value="' + v + '"' + (current === v ? ' selected' : '') + '>' + (v === 0 ? '全部卡片' : '今天 ' + v + ' 个') + '</option>';
+    }).join('');
   }
   // Fisher-Yates 洗牌（随机背诵用）
   function shuffle(a) {
@@ -297,6 +317,8 @@
     var q = reviewSource.slice();
     if (mode === 'random') shuffle(q);
     else if (mode === 'weak') q.sort(function (a, b) { return (a.ef - b.ef) || ((a.due || 0) - (b.due || 0)); });
+    var goal = (state.dailyGoal && state.dailyGoal.review) || 0;
+    if (goal > 0 && q.length > goal) q = q.slice(0, goal);
     reviewQueue = q;
   }
 
@@ -315,6 +337,21 @@
 
     viewEl.addEventListener('click', onClick);
     tabEl.addEventListener('click', onClick);
+    // 目标量 <select> 用 change 事件
+    document.addEventListener('change', function (e) {
+      var t = e.target;
+      if (!t || !t.matches) return;
+      if (t.matches('[data-act="rev-goal"]')) {
+        state.dailyGoal = state.dailyGoal || { review: 0, exam: 0 };
+        state.dailyGoal.review = parseInt(t.value, 10) || 0;
+        reviewSource = null; reviewQueue = null; save(); render(); return;
+      }
+      if (t.matches('[data-act="exam-goal"]')) {
+        state.dailyGoal = state.dailyGoal || { review: 0, exam: 0 };
+        state.dailyGoal.exam = parseInt(t.value, 10) || 0;
+        save(); render(); return;
+      }
+    });
     if (overlayEl) {
       // 弹窗里的按钮（解析/确认导入/关闭等）也要能触发 onClick，否则点了没反应
       overlayEl.addEventListener('click', onClick);
@@ -374,6 +411,7 @@
     state.ai = state.ai || { url: '', key: '', model: 'gpt-4o-mini' };
     state.bookOrder = state.bookOrder || [];
     state.reviewOrder = state.reviewOrder || 'seq';
+    state.dailyGoal = state.dailyGoal || { review: 0, exam: 0 };
     applyTheme();
     if (authEl) { authEl.classList.remove('show'); authEl.classList.add('hidden'); }
     if (userbarEl) {
@@ -405,25 +443,46 @@
     if (!la) localSetup(); else localLogin();
   }
   // 首次使用：设置唯一本机账号（仅此一个，不可再注册）
+  var MOTTO_LIST = [
+    '星光不负赶路人，时光不负有心人。',
+    '你背过的每一个知识点，都是上岸的台阶。',
+    '坚持很酷，放弃很苦，今天也要往前一步。',
+    '乾坤未定，你我皆是黑马。',
+    '那些看似不起波澜的日复一日，会突然在某天让人看到坚持的意义。',
+    '愿你以渺小启程，以伟大结束。',
+    '来得及，考得上，你可以。',
+    '山高路远，但见风光无限。'
+  ];
+  function randomMotto() {
+    return MOTTO_LIST[Math.floor(Math.random() * MOTTO_LIST.length)];
+  }
+  var ENCOUR_REVIEW = ['慢慢来，比较快。', '每一张卡片，都是你的护城河。', '重复是记忆的母亲，加油！', '今天也在向上岸靠近～'];
+  var ENCOUR_EXAM = ['实战检验，查漏补缺。', '错了不亏，对了血赚！', '模拟考就是给上岸攒经验值。', '稳住，我们能赢。'];
+  function randomEncouragement(kind) {
+    var arr = kind === 'exam' ? ENCOUR_EXAM : ENCOUR_REVIEW;
+    return '<span class="enc-emoji">✨</span><span class="enc-text">' + arr[Math.floor(Math.random() * arr.length)] + '</span>';
+  }
+  function setAuthCard(kind) {
+    var card = authEl ? authEl.querySelector('.authcard') : null;
+    if (!card) return;
+    var sub = $('auth-subtitle');
+    var quote = $('auth-quote');
+    var btn = $('btn-login');
+    if (sub) sub.textContent = (kind === 'setup'
+      ? '首次使用，设置账号后下次自动登录，数据长久保存'
+      : '一次登录，下次自动进入，数据为你保留');
+    if (quote) quote.textContent = randomMotto();
+    if (btn) btn.textContent = (kind === 'setup' ? '设置并进入 ✨' : '开始今天的逆袭 💪');
+  }
   function showLocalSetup() {
     showAuth();
-    var card = authEl ? authEl.querySelector('.authcard') : null;
-    if (card) {
-      var sub = card.querySelector('.asub'); if (sub) sub.textContent = (MODE === 'github'
-        ? '首次使用 · 设置一个登录账号（一个账号对应一份数据，自动存到你 GitHub 私人仓库，手机电脑通用）'
-        : '首次使用 · 设置一个本机登录账号（一个账号对应一份独立数据，之后不可重复注册）');
-      var btn = $('btn-login'); if (btn) btn.textContent = '设置并进入';
-    }
+    setAuthCard('setup');
     authMsg('');
   }
   // 已设置过账号：登录
   function showLocalLogin(account) {
     showAuth();
-    var card = authEl ? authEl.querySelector('.authcard') : null;
-    if (card) {
-      var sub = card.querySelector('.asub'); if (sub) sub.textContent = '本机登录 · 数据存在这台设备，密码仅本机使用';
-      var btn = $('btn-login'); if (btn) btn.textContent = '登录';
-    }
+    setAuthCard('login');
     if ($('au')) $('au').value = account || '';
     authMsg('');
   }
@@ -555,10 +614,14 @@
 
   function viewReview() {
     if (!reviewQueue) { if (!reviewSource || !reviewSource.length) reviewSource = (dueCards().length ? dueCards() : state.cards.slice()); applyReviewOrder(); }
+    var goal = (state.dailyGoal && state.dailyGoal.review) || 0;
+    var done = todayReviewedCount();
+    var progressTxt = goal > 0 ? '今日进度 ' + done + ' / ' + goal + ' 🌱' : '今日已背 ' + done + ' 张 🌱';
     if (!reviewQueue || reviewQueue.length === 0) {
       viewEl.innerHTML = '<div class="card center"><div class="big">🎉</div>' +
         '<p>当前没有待复习的卡片。</p>' +
-        (state.cards.length ? '<button class="btn primary" data-act="review-all">复习全部卡片</button>' : '') + '</div>';
+        '<p class="hint">' + progressTxt + '</p>' +
+        (state.cards.length ? '<button class="btn primary" data-act="review-all">' + (goal > 0 ? '今天再背 ' + goal + ' 个' : '复习全部卡片') + '</button>' : '') + '</div>';
       return;
     }
     var card = reviewQueue[0];
@@ -570,12 +633,15 @@
       nextHint = '<p class="hint">' + lastTxt + ' · 熟悉度 ' + familiarity(card) + '%</p>';
     }
     viewEl.innerHTML =
-      '<div class="prog">待复习 ' + reviewQueue.length + ' 张</div>' +
+      '<div class="goalbar"><span class="goaltxt">' + progressTxt + '</span>' +
+      '<select class="goal-select" data-act="rev-goal">' + goalOptionsHtml(goal) + '</select></div>' +
+      '<div class="encour">' + randomEncouragement('review') + '</div>' +
       '<div class="rorder"><span class="rolbl">背诵方式</span>' +
       '<button class="btn small ' + (order === 'seq' ? 'on' : '') + '" data-act="rev-order" data-arg="seq">顺序</button>' +
       '<button class="btn small ' + (order === 'random' ? 'on' : '') + '" data-act="rev-order" data-arg="random">随机</button>' +
       '<button class="btn small ' + (order === 'weak' ? 'on' : '') + '" data-act="rev-order" data-arg="weak">薄弱优先</button>' +
       '</div>' +
+      '<div class="prog">待复习 ' + reviewQueue.length + ' 张</div>' +
       flipCard(card, revealed) +
       nextHint +
       (revealed
@@ -589,7 +655,14 @@
 
   function viewExam() {
     if (!exam) {
-      viewEl.innerHTML = '<div class="card center"><p>从你的卡片里随机抽题自测，<b>不限制题数</b>（全部 ' + state.cards.length + ' 张都会考到）。</p>' +
+      var goal = (state.dailyGoal && state.dailyGoal.exam) || 0;
+      var done = todayExamCount();
+      var progressTxt = goal > 0 ? '今日已测 ' + done + ' / ' + goal + ' 📝' : '今日已测 ' + done + ' 题 📝';
+      viewEl.innerHTML = '<div class="encour">' + randomEncouragement('exam') + '</div>' +
+        '<div class="goalbar"><span class="goaltxt">' + progressTxt + '</span>' +
+        '<select class="goal-select" data-act="exam-goal">' + goalOptionsHtml(goal) + '</select></div>' +
+        '<div class="card center"><p>从你的卡片里随机抽题自测，<b>题量你说了算</b>。</p>' +
+        '<p class="hint">当前共 ' + state.cards.length + ' 张卡片，选择「全部卡片」则全部考到。</p>' +
         '<button class="btn primary" data-act="exam-start">开始模拟考</button></div>';
       return;
     }
@@ -999,12 +1072,13 @@
         var j = Math.floor(Math.random() * (i + 1));
         var tmp = pool[i]; pool[i] = pool[j]; pool[j] = tmp;
       }
-      var cnt = pool.length;   // 不限制题数：全部卡片都考
+      var goal = (state.dailyGoal && state.dailyGoal.exam) || 0;
+      var cnt = (goal > 0 && goal < pool.length) ? goal : pool.length;   // 默认全部，可自选题量
       exam = { queue: pool.slice(0, cnt), idx: 0, score: 0, revealed: false };
       render(); return;
     }
-    if (act === 'exam-correct') { exam.score++; exam.idx++; exam.revealed = false; render(); return; }
-    if (act === 'exam-wrong') { exam.idx++; exam.revealed = false; render(); return; }
+    if (act === 'exam-correct') { if (exam.queue[exam.idx]) exam.queue[exam.idx].lastExam = Date.now(); exam.score++; exam.idx++; exam.revealed = false; render(); return; }
+    if (act === 'exam-wrong') { if (exam.queue[exam.idx]) exam.queue[exam.idx].lastExam = Date.now(); exam.idx++; exam.revealed = false; render(); return; }
     if (act === 'exam-restart') { exam = null; render(); return; }
 
     if (act === 'checkin') {

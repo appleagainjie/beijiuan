@@ -9,7 +9,7 @@
 <link rel="apple-touch-icon" href="icons/icon-192.png">
 <link rel="stylesheet" href="style.css">
 </head>
-<body class="theme-mint">
+<body class="theme-mint-rabbit">
 <header id="topbar">
   <span id="apptitle">背就完事儿了</span>
   <span id="subtitle"></span>
@@ -25,12 +25,15 @@
 <!-- 登录 / 注册层（无后端时自动隐藏） -->
 <div id="auth" class="hidden">
   <div class="authcard">
+    <div class="amascot">🐰</div>
     <div class="alogo">背就完事儿了</div>
-    <p class="asub">本机登录 · 一个账号对应一份独立数据 · 数据存在这台设备</p>
+    <div class="atag">你背过的每一个知识点，都是上岸的台阶 ✨</div>
+    <p class="asub" id="auth-subtitle">一次登录，下次自动进入 · 数据为你保留</p>
     <input id="au" class="inp" placeholder="账号（中英文均可）" autocomplete="username">
     <input id="ap" class="inp" type="password" placeholder="密码（≥6 位）" autocomplete="current-password">
-    <button class="btn primary" id="btn-login">登录</button>
+    <button class="btn primary" id="btn-login">开始今天的逆袭 💪</button>
     <p class="hint" id="auth-msg"></p>
+    <div class="aquote" id="auth-quote">星光不负赶路人，时光不负有心人。</div>
   </div>
 </div>
 
