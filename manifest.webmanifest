@@ -1,0 +1,14 @@
+{
+  "name": "背就完事儿了",
+  "short_name": "背就完了",
+  "description": "背诵打卡卡片",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#e6f7f4",
+  "theme_color": "#21b5a6",
+  "icons": [
+    {"src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png"},
+    {"src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png"},
+    {"src": "icons/icon-512.png", "sizes": "any", "type": "image/png", "purpose": "any maskable"}
+  ]
+}

@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#21b5a6">
+<title>背就完事儿了</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="theme-mint">
+<header id="topbar">
+  <span id="apptitle">背就完事儿了</span>
+  <span id="subtitle"></span>
+  <span id="userbar" class="hidden">
+    <span id="uname"></span>
+    <button id="logout" class="ubtn">退出</button>
+  </span>
+</header>
+<main id="view"></main>
+<nav id="tabbar"></nav>
+<div id="overlay" class="hidden"></div>
+
+<!-- 登录 / 注册层（无后端时自动隐藏） -->
+<div id="auth" class="hidden">
+  <div class="authcard">
+    <div class="alogo">背就完事儿了</div>
+    <p class="asub">本机登录 · 一个账号对应一份独立数据 · 数据存在这台设备</p>
+    <input id="au" class="inp" placeholder="账号（中英文均可）" autocomplete="username">
+    <input id="ap" class="inp" type="password" placeholder="密码（≥6 位）" autocomplete="current-password">
+    <button class="btn primary" id="btn-login">登录</button>
+    <p class="hint" id="auth-msg"></p>
+  </div>
+</div>
+
+<script src="app.js" defer></script>
+</body>
+</html>
