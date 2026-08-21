@@ -369,6 +369,7 @@
   // 部署令牌（自用仓库专用）：以拼接方式存放，避免被公开仓库的密钥扫描拦截；如需更换请在 GitHub 重新生成 PAT 后替换下面两段
   var DEPLOY_TOKEN = 'ghp_' + 'xPeIY2W6Ku9sG1Iz24CWcWE0bWvRs03YuoZF';
   var SYNC_KEY = 'beiji_sync_v1';
+  var APP_VERSION = '2026.08.21c';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
   var cloudSha = null;        // 云端当前文件 sha（轮询判断是否变更）
   var cloudCardCount = 0;     // 云端当前卡片数（用于防“空覆盖”）
   var syncTimer = null;       // 实时同步轮询定时器
@@ -1341,7 +1342,8 @@
         ? '<p class="hint">✅ 云端同步已开启：数据自动双写到本机 + 云端仓库 <b>' + DEPLOY_USER + '/' + DEPLOY_REPO + '</b>（账户：' + esc(ghCfg() ? ghCfg().account : '') + '）。</p>'
         : MODE === 'server'
         ? '<p class="hint">数据存在本机 E 盘文件里（账户：' + esc(session.username) + '）。</p>'
-        : '<p class="hint">⚠️ 当前云端未开启，数据只在本机。填上方令牌开启双保险。</p>');
+        : '<p class="hint">⚠️ 当前云端未开启，数据只在本机。填上方令牌开启双保险。</p>') +
+      '<p class="hint" style="text-align:center;opacity:.65;margin-top:14px">版本 ' + APP_VERSION + '　·　看到这个版本号说明已是最新版</p>';
     setTimeout(refreshBackupStatus, 30);
     var imp = $('importer');
     if (imp) imp.onchange = function () { if (imp.files && imp.files[0]) importData(imp.files[0]); };
