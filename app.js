@@ -83,7 +83,7 @@
 
   /* ---------- 工具 ---------- */
   function emptyState() {
-    return { cards: [], checkins: [], theme: 'mint-rabbit', ai: { url: '', key: '', model: 'gpt-4o-mini' }, bookOrder: [], reviewOrder: 'seq', dailyGoal: { review: 0, exam: 0 }, countdowns: [] };
+    return { cards: [], checkins: [], theme: 'mint-rabbit', ai: { url: '', key: '', model: 'gpt-4o-mini' }, bookOrder: [], reviewOrder: 'seq', dailyGoal: { review: 0, exam: 0 }, countdowns: [], reviewStart: 1 };
   }
   function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
   function pad(n) { return n < 10 ? '0' + n : '' + n; }
@@ -109,6 +109,12 @@
     if (!c.id) c.id = uid();
     if (!Array.isArray(c.points)) c.points = [];
     if (c.cloze == null) c.cloze = false;
+    // 个性化遗忘曲线字段
+    if (!Array.isArray(c.hist)) c.hist = [];          // 复习历史：{t,g,rt}
+    if (c.stability == null) c.stability = 1;          // 稳定度（天）：该卡多久后约忘 10%
+    if (c.difficulty == null) c.difficulty = 0.3;     // 个人难度 0~1
+    if (c.lapse == null) c.lapse = 0;                 // 累计遗忘次数
+    if (c.updatedAt == null) c.updatedAt = 0;         // 最近一次被修改/复习时间（合并用）
     return c;
   }
   function newCard(book, q, a) {
@@ -132,9 +138,10 @@
     return state.cards.filter(function (c) { return (c.due || 0) <= now; });
   }
   function familiarity(c) {
-    // 0-100，越高越熟
-    var f = (c.ef - 1.3) / 1.2 * 100;
-    return Math.round(Math.max(0, Math.min(100, f)));
+    // 0-100，越高越熟：综合「稳定度 S」与「个人难度 D」
+    var S = c.stability || 1, D = (c.difficulty == null) ? 0.3 : c.difficulty;
+    var f = (1 - 1 / (1 + S)) * (1 - D * 0.5);
+    return Math.round(Math.max(0, Math.min(100, f * 100)));
   }
   function streak() {
     var set = {};
@@ -194,11 +201,16 @@
       var c = ghCfg();
       if (!c || !c.token || !c.user || !c.repo || !c.account) return Promise.resolve(localCache);
       return ghLoad().then(function (cloud) {
-        var cT = (cloud && cloud._savedAt) || 0;
-        var lT = (localCache && localCache._savedAt) || 0;
-        // 本地较新（刚导入/编辑但云端还没同步完）→ 用本地，避免刷新丢卡
-        if (lT >= cT && localCache && (localCache.cards || []).length) return localCache;
-        if (cloud && (cloud.cards || cloud.books || cloud.checkins)) return cloud;
+        // 云端为权威：能拉到云端数据就优先用云端（新设备/新浏览器也能看到全部卡片）
+        if (cloud && (cloud.cards || []).length) {
+          cloudCardCount = (cloud.cards || []).length;
+          // 仅当本地有“更晚的未同步修改”时才以本地为准，避免刷新把刚编辑的卡弄丢
+          var cT = cloud._savedAt || 0;
+          var lT = (localCache && localCache._savedAt) || 0;
+          if (lT > cT && (localCache.cards || []).length) return localCache;
+          return cloud;
+        }
+        // 云端空（首次/暂无备份）→ 退回本地缓存
         return localCache;
       }).catch(function () { return localCache; });
     }
@@ -222,11 +234,30 @@
     }
     var c = ghCfg();
     if (!c || !c.token || !c.user || !c.repo || !c.account) return Promise.resolve({});
-    var path = 'data/' + encodeURIComponent(c.account) + '.json';
-    var api = 'https://api.github.com/repos/' + c.user + '/' + c.repo + '/contents/' + path;
+    var file = encodeURIComponent(c.account) + '.json';
+    var api = 'https://api.github.com/repos/' + c.user + '/' + c.repo + '/contents/data/' + file;
+    var rawUrl = 'https://raw.githubusercontent.com/' + c.user + '/' + c.repo + '/main/data/' + file;
     var headers = { 'Authorization': 'token ' + c.token, 'Accept': 'application/vnd.github+json' };
-    var content = utf8ToBase64(prejson || JSON.stringify(d));
-    function attempt(timeoutMs) {
+    // 防覆盖：若本地卡片数少于“云端已知卡片数”，说明本机可能没拉全云端数据，
+    // 直接覆盖会把云端已有卡片冲掉。此时先拉云端合并（本地按 id 优先），再写回。
+    var baseData = d;
+    function prepare() {
+      if (cloudCardCount > 0 && (baseData.cards || []).length < cloudCardCount) {
+        return fetch(rawUrl, { cache: 'no-store' }).then(function (r) { return r.ok ? r.text() : null; }).then(function (txt) {
+          if (!txt) return baseData;
+          try {
+            var cloud = JSON.parse(txt);
+            var map = {}; (baseData.cards || []).forEach(function (x) { map[x.id] = x; });
+            var merged = (cloud.cards || []).map(function (x) { return map[x.id] || x; });
+            (baseData.cards || []).forEach(function (x) { if (!map[x.id]) merged.push(x); });
+            baseData = Object.assign({}, baseData, { cards: merged });
+          } catch (e) {}
+          return baseData;
+        }).catch(function () { return baseData; });
+      }
+      return Promise.resolve(baseData);
+    }
+    function attempt(content, timeoutMs) {
       var ctrl = ('AbortController' in window) ? new AbortController() : null;
       var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, timeoutMs) : null;
       function clearT() { if (timer) clearTimeout(timer); }
@@ -241,22 +272,30 @@
       }
       return getSha().then(function (sha) { return put(sha); }).then(function (r) {
         if (!r.ok) return r.text().then(function (t) { throw new Error('HTTP ' + r.status + ' ' + t.slice(0, 100)); });
-        return { _status: r.status };
+        return r.json().then(function (j) { return j; });
       }, function (e) { clearT(); throw e; }).then(function (res) { clearT(); return res; });
     }
-    return attempt(60000).catch(function (e1) {
-      // 超时 / 网络抖动 → 自动重试一次（共可达 2 分钟，适应国内慢速链路）
-      if (e1 && (e1.name === 'AbortError' || /timeout|Failed to fetch|network/i.test(e1.message || ''))) return attempt(60000);
-      throw e1;
-    }).then(function () { setSyncStatus(true, '已写入云端 ' + c.account); return { _status: 200 }; },
-      function (e) {
-        var msg = (e && e.name === 'AbortError')
-          ? '云端同步超时（网络较慢，已存本机，稍后自动重试）'
-          : ('GitHub 备份失败：' + (e && e.message || '未知错误') + '（本机数据仍有效）');
-        setSyncStatus(false, (e && e.message) || '未知错误');
-        toast(msg);
-        return {}; // 永不 reject，避免上层界面卡死
+    return prepare().then(function (finalData) {
+      var content = utf8ToBase64(JSON.stringify(finalData));
+      return attempt(content, 60000).catch(function (e1) {
+        // 超时 / 网络抖动 → 自动重试一次（共可达 2 分钟，适应国内慢速链路）
+        if (e1 && (e1.name === 'AbortError' || /timeout|Failed to fetch|network/i.test(e1.message || ''))) return attempt(content, 60000);
+        throw e1;
       });
+    }).then(function (res) {
+      if (res && res.sha) cloudSha = res.sha;
+      cloudCardCount = (baseData.cards || []).length;
+      setSyncStatus(true, '已同步到云端 ' + c.account + '（' + cloudCardCount + ' 张）');
+      renderSyncStatus();
+      return { _status: 200 };
+    }, function (e) {
+      var msg = (e && e.name === 'AbortError')
+        ? '云端同步超时（网络较慢，已存本机，稍后自动重试）'
+        : ('GitHub 备份失败：' + (e && e.message || '未知错误') + '（本机数据仍有效）');
+      setSyncStatus(false, (e && e.message) || '未知错误');
+      toast(msg);
+      return {}; // 永不 reject，避免上层界面卡死
+    });
   }
   function ghLoad() {
     // GitHub Pages 部署：单人自用仓库，无条件使用部署令牌
@@ -267,49 +306,149 @@
       setGhCfg(_lc);
     }
     var c = ghCfg();
-    if (!c || !c.token || !c.user || !c.repo || !c.account) return Promise.resolve(emptyState());
-    var path = 'data/' + encodeURIComponent(c.account) + '.json';
-    var api = 'https://api.github.com/repos/' + c.user + '/' + c.repo + '/contents/' + path;
+    if (!c || !c.token || !c.user || !c.repo || !c.account) return Promise.resolve(null);
+    var file = encodeURIComponent(c.account) + '.json';
+    var metaApi = 'https://api.github.com/repos/' + c.user + '/' + c.repo + '/contents/data/' + file;
+    var rawUrl = 'https://raw.githubusercontent.com/' + c.user + '/' + c.repo + '/main/data/' + file;
     var headers = { 'Authorization': 'token ' + c.token, 'Accept': 'application/vnd.github+json' };
+    // 关键修复：GitHub 的 contents API 对 >1MB 的文件会返回 content:""（截断），
+    // 导致 2MB 云端文件被读成空 → 新设备/新浏览器登录后卡片全空。
+    // 改为：先用极小的元数据接口取 sha，再用 raw 直链读取正文（支持任意大小）。
     function attempt(timeoutMs) {
       var ctrl = ('AbortController' in window) ? new AbortController() : null;
       var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, timeoutMs) : null;
       function clearT() { if (timer) clearTimeout(timer); }
-      return fetch(api, { headers: headers, signal: ctrl ? ctrl.signal : undefined })
+      return fetch(metaApi, { headers: headers, signal: ctrl ? ctrl.signal : undefined })
         .then(function (r) {
-          if (r.status === 404) return emptyState();
+          if (r.status === 404) return { notFound: true };
           if (!r.ok) {
-            var extra = r.status === 401 ? '（令牌无效或已失效）' : r.status === 403 ? '（令牌无权限或被限流）' : r.status === 404 ? '（云端暂无该账户文件）' : '';
+            var extra = r.status === 401 ? '（令牌无效或已失效）' : r.status === 403 ? '（令牌无权限或被限流）' : '';
             throw new Error('HTTP ' + r.status + extra);
           }
           return r.json();
         }, function (e) { clearT(); throw e; })
-        .then(function (j) {
-          if (j && j.content) { try { return JSON.parse(base64ToUtf8(j.content)); } catch (e) { return emptyState(); } }
-          return emptyState();
+        .then(function (meta) {
+          if (meta && meta.notFound) return null;
+          if (meta && meta.sha) { cloudSha = meta.sha; }
+          // raw 直链读取正文（无 1MB 限制，无需鉴权，公开仓库可用）
+          return fetch(rawUrl, { signal: ctrl ? ctrl.signal : undefined, cache: 'no-store' })
+            .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); }, function (e) { clearT(); throw e; })
+            .then(function (txt) {
+              if (!txt) return null;
+              try { return JSON.parse(txt); } catch (e) { throw new Error('解析云端数据失败'); }
+            });
         }, function (e) { clearT(); throw e; })
         .then(function (res) { clearT(); return res; });
     }
     return attempt(60000).catch(function (e1) {
       if (e1 && (e1.name === 'AbortError' || /timeout|Failed to fetch|network/i.test(e1.message || ''))) return attempt(60000);
       throw e1;
-    }).then(function (res) { setSyncStatus(true, '已从云端读取 ' + c.account); return res; },
-      function (e) {
-        var msg = (e && e.name === 'AbortError')
-          ? '云端读取超时（本机数据仍有效，稍后自动重试）'
-          : ('GitHub 读取失败：' + (e && e.message || '未知错误') + '（本机数据仍有效）');
-        setSyncStatus(false, (e && e.message) || '未知错误');
-        toast(msg);
-        return emptyState();
-      });
+    }).then(function (res) {
+      if (res && (res.cards || []).length) {
+        cloudCardCount = (res.cards || []).length;
+        setSyncStatus(true, '已从云端读取 ' + c.account + '（' + cloudCardCount + ' 张）');
+      } else if (res) {
+        cloudCardCount = 0;
+        setSyncStatus(true, '云端暂无数据 ' + c.account);
+      }
+      return res;
+    }, function (e) {
+      var msg = (e && e.name === 'AbortError')
+        ? '云端读取超时（本机数据仍有效，稍后自动重试）'
+        : ('GitHub 读取失败：' + (e && e.message || '未知错误') + '（本机数据仍有效）');
+      setSyncStatus(false, (e && e.message) || '未知错误');
+      toast(msg);
+      return null;
+    });
   }
   /* ---------- 本机 IndexedDB 多副本备份（独立于 localStorage，抗单点损坏、可回滚） ---------- */
   var IDB_NAME = 'beiji_backup_v1', IDB_STORE = 'snap', DEPLOY_USER = 'appleagainjie', DEPLOY_REPO = 'beijiuan';
   // 部署令牌（自用仓库专用）：以拼接方式存放，避免被公开仓库的密钥扫描拦截；如需更换请在 GitHub 重新生成 PAT 后替换下面两段
   var DEPLOY_TOKEN = 'ghp_' + 'xPeIY2W6Ku9sG1Iz24CWcWE0bWvRs03YuoZF';
   var SYNC_KEY = 'beiji_sync_v1';
+  var cloudSha = null;        // 云端当前文件 sha（轮询判断是否变更）
+  var cloudCardCount = 0;     // 云端当前卡片数（用于防“空覆盖”）
+  var syncTimer = null;       // 实时同步轮询定时器
   function setSyncStatus(ok, info) {
     try { localStorage.setItem(SYNC_KEY, JSON.stringify({ ok: ok, info: info || '', at: Date.now() })); } catch (e) {}
+  }
+  function renderSyncStatus() {
+    var el = $('sync-status'); if (!el) return;
+    try {
+      var s = JSON.parse(localStorage.getItem(SYNC_KEY) || 'null');
+      if (!s) { el.textContent = '同步状态：待同步'; el.style.color = ''; return; }
+      var ago = Math.round((Date.now() - (s.at || 0)) / 1000);
+      var when = ago < 60 ? ago + '秒前' : (ago < 3600 ? Math.round(ago / 60) + '分钟前' : Math.round(ago / 3600) + '小时前');
+      el.textContent = (s.ok ? '🟢 云端同步正常（' + when + '）' : '🔴 云端异常：' + (s.info || '')) + ' · 云端 ' + cloudCardCount + ' 张';
+      el.style.color = s.ok ? '' : '#d9534f';
+    } catch (e) {}
+  }
+  // 把云端卡片合并进当前 state（按 id；以“更新时间”较新者为准，避免互相覆盖）
+  function mergeCloudIntoState(cloud) {
+    if (!cloud || !cloud.cards) return;
+    var map = {};
+    state.cards.forEach(function (c) { map[c.id] = c; });
+    cloud.cards.forEach(function (cc) {
+      var local = map[cc.id];
+      if (!local) { state.cards.push(cc); return; }
+      var lt = local.updatedAt || local.lastReview || local.created || 0;
+      var ct = cc.updatedAt || cc.lastReview || cc.created || 0;
+      if (ct > lt) { var i = state.cards.indexOf(local); if (i >= 0) state.cards[i] = cc; }
+    });
+    if (cloud.checkins) {
+      var cs = {}; (state.checkins || []).forEach(function (d) { cs[d] = 1; });
+      (cloud.checkins || []).forEach(function (d) { if (!cs[d]) { state.checkins.push(d); cs[d] = 1; } });
+    }
+  }
+  // 轮询：仅比对 sha（极轻量），发现云端变更才拉正文合并 → 实现跨设备近实时同步
+  function syncPull() {
+    if (MODE !== 'github' || !currentAccount) return;
+    var c = ghCfg();
+    if (!c || !c.token || !c.user || !c.repo || !c.account) return;
+    var api = 'https://api.github.com/repos/' + c.user + '/' + c.repo + '/contents/data/' + encodeURIComponent(c.account) + '.json';
+    var headers = { 'Authorization': 'token ' + c.token, 'Accept': 'application/vnd.github+json' };
+    fetch(api, { headers: headers, cache: 'no-store' }).then(function (r) { return r.ok ? r.json() : null; }).then(function (meta) {
+      if (!meta || !meta.sha || meta.sha === cloudSha) return;
+      var rawUrl = 'https://raw.githubusercontent.com/' + c.user + '/' + c.repo + '/main/data/' + encodeURIComponent(c.account) + '.json';
+      return fetch(rawUrl, { cache: 'no-store' }).then(function (r) { return r.ok ? r.text() : null; }).then(function (txt) {
+        if (!txt) return;
+        try {
+          var cloud = JSON.parse(txt);
+          cloudSha = meta.sha;
+          cloudCardCount = (cloud.cards || []).length;
+          var before = state.cards.length;
+          mergeCloudIntoState(cloud);
+          if (state.cards.length !== before) {
+            save();
+            if (view !== 'review' && view !== 'exam') render();
+          }
+          setSyncStatus(true, '已拉取云端更新（' + cloudCardCount + ' 张）');
+          renderSyncStatus();
+        } catch (e) {}
+      });
+    }).catch(function () {});
+  }
+  function startSyncPolling() {
+    if (MODE !== 'github') return;
+    if (syncTimer) clearInterval(syncTimer);
+    syncTimer = setInterval(syncPull, 90000); // 90s 轮询一次（仅比对 sha，极轻量）
+    window.addEventListener('focus', syncPull);
+    document.addEventListener('visibilitychange', function () { if (!document.hidden) syncPull(); });
+  }
+  function manualSync() {
+    if (MODE !== 'github' || !currentAccount) { toast('当前不是云端模式'); return; }
+    var c = ghCfg(); if (!c || !c.token) { toast('未配置云端令牌'); return; }
+    toast('正在与云端同步…');
+    var api = 'https://api.github.com/repos/' + c.user + '/' + c.repo + '/contents/data/' + encodeURIComponent(c.account) + '.json';
+    var headers = { 'Authorization': 'token ' + c.token, 'Accept': 'application/vnd.github+json' };
+    fetch(api, { headers: headers, cache: 'no-store' }).then(function (r) { return r.ok ? r.json() : null; }).then(function (meta) {
+      if (meta && meta.sha && meta.sha !== cloudSha) {
+        var rawUrl = 'https://raw.githubusercontent.com/' + c.user + '/' + c.repo + '/main/data/' + encodeURIComponent(c.account) + '.json';
+        return fetch(rawUrl, { cache: 'no-store' }).then(function (r) { return r.ok ? r.text() : null; }).then(function (txt) {
+          if (txt) { try { var cloud = JSON.parse(txt); cloudSha = meta.sha; cloudCardCount = (cloud.cards || []).length; var before = state.cards.length; mergeCloudIntoState(cloud); if (state.cards.length !== before) save(); } catch (e) {} }
+        });
+      }
+    }).then(function () { return saveData(state); }).then(function () { toast('✅ 已与云端同步'); renderSyncStatus(); render(); }).catch(function () { toast('同步失败，稍后重试'); });
   }
   function idbOpen() {
     return new Promise(function (res, rej) {
@@ -380,36 +519,76 @@
   }
   function save() {
     // 剥离会话级临时字段
-    state.cards.forEach(function (c) { delete c._revealed; });
+    state.cards.forEach(function (c) { delete c._revealed; delete c._revealAt; });
     reviewSource = null;   // 卡片变化后，复习队列来源待重建，避免用到旧集合
     clearTimeout(saveTimer);
     saveTimer = setTimeout(function () { saveData(state); }, 300);
   }
 
-  /* ---------- 复习算法（SM-2 变体，参考墨墨） ---------- */
-  // q: 1=忘记, 3=模糊, 5=认识
-  function grade(card, q) {
-    var ef = card.ef, reps = card.reps, interval = card.interval;
-    if (q < 3) {                       // 忘记：立刻重来，本轮再出现
-      reps = 0; interval = 0; ef = Math.max(1.3, ef - 0.3);
-    } else if (q === 3) {              // 模糊：明天再巩固，熟悉度下调
-      reps = 0; interval = 1; ef = Math.max(1.3, ef - 0.15);
-    } else {                           // 认识：推进间隔
-      if (reps === 0) interval = 1;
-      else if (reps === 1) interval = 6;
-      else interval = Math.round(interval * ef);
-      reps++;
-      ef = ef + (0.1 - (5 - q) * (0.08 + (5 - q) * 0.02));
-      if (ef < 1.3) ef = 1.3;
+  /* ---------- 个性化遗忘曲线（基于你自己的复习历史，不套用任何通用模型） ----------
+     q: 1=忘记 2=模糊 3=认识 4=精通
+     每张卡维护「稳定度 S(天)」与「个人难度 D(0~1)」，完全由你本人的答对/答错、反应时长演化；
+     再结合你全库的整体记忆率 personalRetention，得到专属于你的复习间隔。 */
+  function globalRetention() {
+    var correct = 0, total = 0;
+    state.cards.forEach(function (c) {
+      (c.hist || []).forEach(function (h) { total++; if (h.g >= 3) correct++; });
+    });
+    return { retention: total ? correct / total : 0.9, total: total };
+  }
+  function grade(card, q, rtMs) {
+    q = Math.min(4, Math.max(1, parseInt(q, 10) || 1));
+    var now = Date.now();
+    card.hist = card.hist || [];
+    card.hist.push({ t: now, g: q, rt: rtMs || 0 });
+    if (card.hist.length > 40) card.hist = card.hist.slice(-40);
+    var S = card.stability || 1;
+    var D = (card.difficulty == null) ? 0.3 : card.difficulty;
+    var gr = globalRetention().retention; // 你个人的整体记忆率 0~1
+    if (q === 1) {
+      // 忘记：稳定度骤降、难度上升、遗忘计数+1（下次很快再来）
+      S = Math.max(0.25, S * 0.3);
+      D = Math.min(1, D + 0.12);
+      card.lapse = (card.lapse || 0) + 1;
+    } else {
+      var success = q - 1;                                  // 0(模糊) 1(认识) 2(精通)
+      var growth = 1 + 0.6 * success + 0.4 * (1 - D);       // 答得越好、对你越简单的卡，间隔涨越快
+      var personal = 0.7 + 0.6 * gr;                        // 你整体记性越好，所有卡的间隔整体越长
+      S = Math.min(365, S * growth * personal);
+      D = Math.max(0, Math.min(1, D - 0.05 * success + 0.03));
     }
-    card.ef = ef; card.reps = reps; card.interval = interval;
-    card.due = Date.now() + interval * DAY;
+    card.stability = S;
+    card.difficulty = D;
+    card.interval = Math.round(S);
+    card.ef = 1.3 + D * 1.2;                                 // 兼容旧字段/显示
+    card.due = now + S * DAY;
     card.lastGrade = q;
-    card.lastReview = Date.now();
+    card.lastReview = now;
+    card.updatedAt = now;
     return card;
   }
   function isToday(ts) {
     return !!ts && todayStr() === new Date(ts).toLocaleDateString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' }).replace(/\//g, '-');
+  }
+  // 你自己的「每日记忆曲线」：最近 days 天，每天按你的真实答对率绘制（个性化遗忘/留存曲线）
+  function dailyRetention(days) {
+    var map = {};
+    state.cards.forEach(function (c) {
+      (c.hist || []).forEach(function (h) {
+        var d = new Date(h.t);
+        var key = d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+        if (!map[key]) map[key] = { c: 0, t: 0 };
+        map[key].t++; if (h.g >= 3) map[key].c++;
+      });
+    });
+    var arr = [], today = new Date();
+    for (var i = days - 1; i >= 0; i--) {
+      var d = new Date(today); d.setDate(d.getDate() - i);
+      var key = d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+      var m = map[key] || { c: 0, t: 0 };
+      arr.push({ day: key.slice(5), rate: m.t ? Math.round(m.c / m.t * 100) : null, t: m.t });
+    }
+    return arr;
   }
   function todayReviewedCount() {
     var n = 0;
@@ -465,9 +644,16 @@
     var mode = state.reviewOrder || 'seq';
     var q = reviewSource.slice();
     if (mode === 'random') shuffle(q);
-    else if (mode === 'weak') q.sort(function (a, b) { return (a.ef - b.ef) || ((a.due || 0) - (b.due || 0)); });
+    else if (mode === 'weak') q.sort(function (a, b) { return ((a.stability || 1) - (b.stability || 1)) || ((a.due || 0) - (b.due || 0)); });
     var goal = (state.dailyGoal && state.dailyGoal.review) || 0;
     if (goal > 0 && q.length > goal) q = q.slice(0, goal);
+    // 起始位置：从「第 N 张」开始复习（在最终队列上循环偏移，便于分段背诵）
+    var total = q.length;
+    var start = ((state.reviewStart || 1) - 1);
+    if (start > 0 && total > 1) {
+      start = ((start % total) + total) % total;
+      q = q.slice(start).concat(q.slice(0, start));
+    }
     reviewQueue = q;
   }
 
@@ -562,7 +748,9 @@
     state.reviewOrder = state.reviewOrder || 'seq';
     state.dailyGoal = state.dailyGoal || { review: 0, exam: 0 };
     state.countdowns = state.countdowns || [];
+    state.reviewStart = state.reviewStart || 1;
     applyTheme();
+    if (MODE === 'github') startSyncPolling();
     if (authEl) { authEl.classList.remove('show'); authEl.classList.add('hidden'); }
     if (userbarEl) {
       userbarEl.classList.remove('hidden');
@@ -708,6 +896,7 @@
   }
   function render() {
     renderTabbar();
+    renderSyncStatus();
     var SUB = { add: '录入新卡片', review: '该复习啦', exam: '自测一下', checkin: '每天打卡', library: '管理书架', mine: '设置与备份' };
     subEl.textContent = SUB[view] || '';
     if (view === 'add') viewAdd();
@@ -794,7 +983,7 @@
     var order = state.reviewOrder || 'seq';
     var nextHint = '';
     if (card.lastGrade) {
-      var lastTxt = card.lastGrade === 5 ? '上次：认识' : card.lastGrade === 3 ? '上次：模糊' : '上次：忘记';
+      var lastTxt = card.lastGrade === 4 ? '上次：精通' : card.lastGrade === 3 ? '上次：认识' : card.lastGrade === 2 ? '上次：模糊' : '上次：忘记';
       nextHint = '<p class="hint">' + lastTxt + ' · 熟悉度 ' + familiarity(card) + '%</p>';
     }
     viewEl.innerHTML =
@@ -807,14 +996,19 @@
       '<button class="btn small ' + (order === 'random' ? 'on' : '') + '" data-act="rev-order" data-arg="random">随机</button>' +
       '<button class="btn small ' + (order === 'weak' ? 'on' : '') + '" data-act="rev-order" data-arg="weak">薄弱优先</button>' +
       '</div>' +
+      '<div class="rstart"><span class="rolbl">从哪开始</span>' +
+      '<span>从第</span><input id="rev-start-in" class="num" type="number" min="1" value="' + (state.reviewStart || 1) + '">' +
+      '<span>张开始（共 ' + (reviewSource ? reviewSource.length : state.cards.length) + ' 张）</span>' +
+      '<button class="btn small" data-act="rev-start">应用</button></div>' +
       '<div class="prog">待复习 ' + reviewQueue.length + ' 张</div>' +
       flipCard(card, revealed) +
       nextHint +
       (revealed
-        ? '<div class="row3">' +
+        ? '<div class="row4">' +
         '<button class="btn r-forget" data-act="grade" data-arg="1">忘记 ✗</button>' +
-        '<button class="btn r-fuzzy" data-act="grade" data-arg="3">模糊</button>' +
-        '<button class="btn good" data-act="grade" data-arg="5">认识 ✓</button>' +
+        '<button class="btn r-fuzzy" data-act="grade" data-arg="2">模糊</button>' +
+        '<button class="btn good" data-act="grade" data-arg="3">认识 ✓</button>' +
+        '<button class="btn best" data-act="grade" data-arg="4">精通 ★</button>' +
         '</div>'
         : '<button class="btn primary" data-act="reveal">显示答案</button>');
   }
@@ -1015,7 +1209,7 @@
       '<button class="btn primary" data-act="cd-add">添加倒计时</button>' +
       '</div>' +
       '<div class="card"><div class="lbl">复习分布（按下次复习时间）</div>' + dist + '</div>' +
-      '<div class="card"><div class="lbl">遗忘曲线（越往右越容易忘，点「认识」会推远复习点）</div>' + curve + '</div>' +
+      '<div class="card"><div class="lbl">个人记忆曲线（最近 14 天，按你自己的真实答对率绘制，不套用通用模型）</div>' + curve + '</div>' +
       '<div class="card"><div class="lbl">主题（点一下立刻换，选择会记住）</div><div class="themes">' + th + '</div></div>' +
       '<div class="card">' +
       '<button class="btn" data-act="export">导出备份(JSON)</button>' +
@@ -1054,7 +1248,8 @@
       (MODE === 'github' ? '<button class="btn" data-act="fill-deploy-token">一键填入部署令牌</button>' : '') +
       '<p class="hint">数据按你的登录账号分文件存储：<b>' + esc(currentAccount || (localAuthGet() && localAuthGet().account) || '（未登录）') + '</b>。令牌生成：GitHub→右上角头像→Settings→Developer settings→Personal access tokens→Generate new token(classic)，勾 repo，生成后粘贴。</p>' +
       '<div class="ghbtns"><button class="btn primary" data-act="save-gh">保存并开启云端</button>' +
-      '<button class="btn" data-act="backup-gh">立即备份</button></div>' +
+      '<button class="btn" data-act="backup-gh">立即备份</button>' +
+      '<button class="btn" data-act="sync-now">立即同步（跨设备）</button></div>' +
       '<p class="hint" id="gh-status"></p>' +
       '<p class="hint" id="sync-status"></p>' +
       '</div>' +
@@ -1073,46 +1268,41 @@
     if (imp) imp.onchange = function () { if (imp.files && imp.files[0]) importData(imp.files[0]); };
   }
 
-  // 内联 SVG 遗忘曲线（Ebbinghaus：R(t)=e^(-t/S)，S 与平均 ef 相关）
+  // 内联 SVG：你的「个人记忆曲线」——仅用你自己最近 N 天的真实复习答对率绘制，
+  // 不套用任何网上通用模型（如艾宾浩斯公式），完全来自你本人的复习历史。
   function buildCurveSVG() {
-    var W = 300, H = 150, padL = 28, padB = 22, padT = 10, padR = 8;
+    var W = 320, H = 160, padL = 26, padB = 22, padT = 12, padR = 8;
     var plotW = W - padL - padR, plotH = H - padT - padB;
-    var maxT = 30; // 天数
-    var cards = state.cards;
-    var avgEf = 2.5;
-    if (cards.length) {
-      var sum = 0; cards.forEach(function (c) { sum += c.ef; });
-      avgEf = sum / cards.length;
-    }
-    var S = avgEf * 2.2; // 稳定度系数（天）
-    function rt(t) { return Math.exp(-t / S); }
-    function X(t) { return padL + t / maxT * plotW; }
-    function Y(r) { return padT + (1 - r) * plotH; }
-    // 曲线
-    var pts = [];
-    for (var t = 0; t <= maxT; t += 1) pts.push(X(t).toFixed(1) + ',' + Y(rt(t)).toFixed(1));
-    var path = pts.join(' ');
-    // 下次复习点
-    var now = Date.now();
-    var marks = '';
-    cards.forEach(function (c) {
-      var days = Math.round(((c.due || 0) - now) / DAY);
-      if (days < 0) days = 0; if (days > maxT) return;
-      var r = rt(days);
-      marks += '<circle cx="' + X(days).toFixed(1) + '" cy="' + Y(r).toFixed(1) + '" r="2.6" fill="var(--primary)"/>';
-    });
+    var days = 14;
+    var data = dailyRetention(days); // [{day, rate(0~100|null), t}]
+    var hasData = data.some(function (d) { return d.rate != null; });
     var grid = '';
-    [0, 0.25, 0.5, 0.75, 1].forEach(function (g) {
-      var y = Y(g);
-      grid += '<line x1="' + padL + '" y1="' + y.toFixed(1) + '" x2="' + (W - padR) + '" y2="' + y.toFixed(1) + '" stroke="#e3e3e3" stroke-width="1"/>';
-      grid += '<text x="2" y="' + (y + 3).toFixed(1) + '" font-size="8" fill="#999">' + Math.round(g * 100) + '</text>';
+    [0, 25, 50, 75, 100].forEach(function (g) {
+      var y = padT + (1 - g / 100) * plotH;
+      grid += '<line x1="' + padL + '" y1="' + y.toFixed(1) + '" x2="' + (W - padR) + '" y2="' + y.toFixed(1) + '" stroke="#eef0f2" stroke-width="1"/>';
+      grid += '<text x="2" y="' + (y + 3).toFixed(1) + '" font-size="8" fill="#9aa0a6">' + g + '</text>';
     });
+    if (!hasData) {
+      return '<div style="height:120px;display:flex;align-items:center;justify-content:center;color:#9aa0a6;font-size:12px;text-align:center">' +
+        '你还没有复习记录<br>背几张卡片后，这里会画出<strong style="color:var(--primary)">你自己的记忆曲线</strong></div>';
+    }
+    function X(i) { return padL + (days - 1 ? i / (days - 1) : 0) * plotW; }
+    function Y(r) { return padT + (1 - r / 100) * plotH; }
+    // 仅连接有数据的点（跳过没复习的日子）
+    var pts = [];
+    data.forEach(function (d, i) { if (d.rate != null) pts.push(X(i).toFixed(1) + ',' + Y(d.rate).toFixed(1)); });
+    var path = pts.join(' ');
+    // 圆点 + 日期（每 3 天标一个，避免拥挤）
+    var dots = '';
+    data.forEach(function (d, i) {
+      if (d.rate == null) return;
+      dots += '<circle cx="' + X(i).toFixed(1) + '" cy="' + Y(d.rate).toFixed(1) + '" r="2.8" fill="var(--primary)"/>';
+      if (i % 3 === 0 || i === days - 1) dots += '<text x="' + X(i).toFixed(1) + '" y="' + (H - 6) + '" font-size="7" fill="#9aa0a6" text-anchor="middle">' + d.day + '</text>';
+    });
+    var gr = globalRetention();
+    var legend = '<text x="' + (W - padR) + '" y="' + (padT + 2) + '" font-size="9" fill="var(--primary)" text-anchor="end">你整体记忆率 ' + Math.round(gr.retention * 100) + '%</text>';
     return '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" style="display:block">' +
-      grid +
-      '<polyline points="' + path + '" fill="none" stroke="var(--primary)" stroke-width="2"/>' +
-      marks +
-      '<text x="' + (W - padR - 2) + '" y="' + (H - 4) + '" font-size="8" fill="#999" text-anchor="end">天 →</text>' +
-      '</svg>';
+      grid + '<polyline points="' + path + '" fill="none" stroke="var(--primary)" stroke-width="2"/>' + dots + legend + '</svg>';
   }
 
   /* ---------- 事件 ---------- */
@@ -1274,9 +1464,11 @@
       return;
     }
 
+    if (act === 'sync-now') { manualSync(); return; }
+
     if (act === 'reveal') {
       if (exam) exam.revealed = true;
-      else if (reviewQueue && reviewQueue[0]) reviewQueue[0]._revealed = true;
+      else if (reviewQueue && reviewQueue[0]) { reviewQueue[0]._revealed = true; reviewQueue[0]._revealAt = Date.now(); }
       render(); return;
     }
 
@@ -1284,9 +1476,10 @@
       if (!reviewQueue || !reviewQueue[0]) return;
       var card = reviewQueue[0];
       var q = parseInt(arg, 10);
-      grade(card, q);
+      var rt = card._revealAt ? (Date.now() - card._revealAt) : 0;
+      grade(card, q, rt);
       card._revealed = false;
-      if (q < 3) {
+      if (q === 1) {
         // 忘记：移到队列末尾，本轮再出现
         reviewQueue.push(reviewQueue.shift());
       } else {
@@ -1298,6 +1491,17 @@
     }
 
     if (act === 'review-all') { reviewQueue = null; reviewSource = state.cards.slice(); applyReviewOrder(); render(); return; }
+    if (act === 'rev-start') {
+      var total = reviewSource ? reviewSource.length : state.cards.length;
+      var n = parseInt(val('rev-start-in'), 10);
+      if (!n || n < 1) n = 1;
+      if (n > total && total > 0) n = total;
+      state.reviewStart = n;
+      reviewQueue = null; // 重建队列（applyReviewOrder 会按起始位置旋转）
+      save();
+      toast('已设置：从第 ' + n + ' 张开始');
+      render(); return;
+    }
     if (act === 'review-book') {
       var rb = state.cards.filter(function (c) { return c.book === arg; });
       if (!rb.length) { toast('这本书还没有卡片'); return; }
