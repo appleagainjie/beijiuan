@@ -32,6 +32,11 @@
   var saveTimer = null;
   var loadingEl = null;
   var GITHUB_KEY = 'beiji_gh';
+  var AUTO_KEY = 'beiji_auto_v1';          // 记住本机已登录账号，实现“同设备自动登录”
+  var reviewSource = null;                 // 当前复习队列的来源集合（待复习 / 全部 / 某本书）
+  var libraryMode = 'books';               // 书库页：'books' 按书目 | 'cards' 管理卡片
+  var manageSel = {};                      // 管理卡片：已选中的卡片 id -> true
+  var manageBook = '';                     // 管理卡片：按书目筛选（'' = 全部）
   function ghCfg() { try { return JSON.parse(localStorage.getItem(GITHUB_KEY) || 'null'); } catch (e) { return null; } }
   function setGhCfg(c) { try { localStorage.setItem(GITHUB_KEY, JSON.stringify(c)); } catch (e) {} }
   function utf8ToBase64(str) {
@@ -251,6 +256,7 @@
   function save() {
     // 剥离会话级临时字段
     state.cards.forEach(function (c) { delete c._revealed; });
+    reviewSource = null;   // 卡片变化后，复习队列来源待重建，避免用到旧集合
     clearTimeout(saveTimer);
     saveTimer = setTimeout(function () { saveData(state); }, 300);
   }
@@ -275,6 +281,23 @@
     card.due = Date.now() + interval * DAY;
     card.lastGrade = q;
     return card;
+  }
+  // Fisher-Yates 洗牌（随机背诵用）
+  function shuffle(a) {
+    for (var i = a.length - 1; i > 0; i--) {
+      var j = Math.floor(Math.random() * (i + 1));
+      var t = a[i]; a[i] = a[j]; a[j] = t;
+    }
+    return a;
+  }
+  // 按当前选择的顺序重建复习队列：顺序 / 随机 / 薄弱优先（ef 越低越先）
+  function applyReviewOrder() {
+    if (!reviewSource || !reviewSource.length) reviewSource = state.cards.slice();
+    var mode = state.reviewOrder || 'seq';
+    var q = reviewSource.slice();
+    if (mode === 'random') shuffle(q);
+    else if (mode === 'weak') q.sort(function (a, b) { return (a.ef - b.ef) || ((a.due || 0) - (b.due || 0)); });
+    reviewQueue = q;
   }
 
   /* ---------- 初始化 ---------- */
@@ -314,13 +337,6 @@
   }
 
   function boot() {
-    if (MODE === 'github') {
-      // 先过本机登录门禁（单账号），登录后按账号从 GitHub 拉取数据
-      var la = localAuthGet();
-      if (!la) showLocalSetup();
-      else showLocalLogin(la.account);
-      return;
-    }
     if (MODE === 'server') {
       var s = null;
       try { s = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null'); } catch (e) {}
@@ -333,12 +349,14 @@
       } else {
         showAuth();
       }
-    } else {
-      // local 模式：先过本机登录门禁（首次需设置唯一账号）
-      var la = localAuthGet();
-      if (!la) showLocalSetup();
-      else showLocalLogin(la.account);
+      return;
     }
+    // github / local 共用本机登录（单账号，数据隔离）
+    var la = localAuthGet();
+    if (!la) { showLocalSetup(); return; }
+    // 自动登录：同一设备（手机/电脑）已登录过 → 直接进，不再输密码
+    if (localStorage.getItem(AUTO_KEY) === la.account) { localSilentLogin(la.account); return; }
+    showLocalLogin(la.account);
   }
 
   function showAuth() {
@@ -355,6 +373,7 @@
     state.theme = state.theme || 'mint';
     state.ai = state.ai || { url: '', key: '', model: 'gpt-4o-mini' };
     state.bookOrder = state.bookOrder || [];
+    state.reviewOrder = state.reviewOrder || 'seq';
     applyTheme();
     if (authEl) { authEl.classList.remove('show'); authEl.classList.add('hidden'); }
     if (userbarEl) {
@@ -414,6 +433,7 @@
     if (p.length < 6) { authMsg('密码至少 6 位'); return; }
     localAuthSet(u, hashPwd(p, u));
     currentAccount = u;
+    try { localStorage.setItem(AUTO_KEY, u); } catch (e) {}   // 记住登录，下次自动进
     syncGhAccount();
     authMsg('');
     loadData().then(enterApp);
@@ -426,18 +446,26 @@
     if (u !== la.account) { authMsg('账号不存在'); return; }
     if (hashPwd(p, la.account) !== la.hash) { authMsg('密码错误'); return; }
     currentAccount = la.account;
+    try { localStorage.setItem(AUTO_KEY, la.account); } catch (e) {}  // 记住登录，下次自动进
+    syncGhAccount();
+    authMsg('');
+    loadData().then(enterApp);
+  }
+  // 自动登录：跳过密码，直接按账号从存储（云端/本地）载入数据进入
+  function localSilentLogin(account) {
+    currentAccount = account;
     syncGhAccount();
     authMsg('');
     loadData().then(enterApp);
   }
   function doLogout() {
-    if (MODE === 'server' && session) {
-      api('POST', '/api/logout', { token: session.token });
-    }
     session = null; currentAccount = null;
     try { localStorage.removeItem(SESSION_KEY); } catch (e) {}
-    if (MODE === 'local') { var la = localAuthGet(); if (la) showLocalLogin(la.account); else showLocalSetup(); }
-    else showAuth();
+    if (MODE === 'server') { showAuth(); return; }
+    // github / local：仅锁屏，不清除 AUTO_KEY 与数据。
+    // 重新打开链接仍会自动登录，卡片不会丢；如需彻底清空请用「我的 → 清除本机数据」。
+    var la = localAuthGet();
+    if (la) showLocalLogin(la.account); else showLocalSetup();
   }
 
   function applyTheme() {
@@ -461,7 +489,10 @@
   }
   function show(name) {
     view = name;
-    if (name === 'review' && !reviewQueue) reviewQueue = dueCards();
+    if (name === 'review') {
+      if (!reviewSource || !reviewSource.length) reviewSource = (dueCards().length ? dueCards() : state.cards.slice());
+      if (!reviewQueue) applyReviewOrder();
+    }
     render();
   }
   function render() {
@@ -481,7 +512,7 @@
     var opts = bookList().map(function (b) { return '<option value="' + esc(b) + '">'; }).join('');
     viewEl.innerHTML =
       '<div class="card">' +
-      '<label class="lbl">所属书 / 科目</label>' +
+      '<label class="lbl">所属书 / 科目 <span class="req">*必填</span></label>' +
       '<input id="f-book" list="bookopts" placeholder="如：经济法 / 英语单词" class="inp">' +
       '<datalist id="bookopts">' + opts + '</datalist>' +
       '<label class="lbl">正面（问题）</label>' +
@@ -523,7 +554,7 @@
   }
 
   function viewReview() {
-    if (!reviewQueue) reviewQueue = dueCards();
+    if (!reviewQueue) { if (!reviewSource || !reviewSource.length) reviewSource = (dueCards().length ? dueCards() : state.cards.slice()); applyReviewOrder(); }
     if (!reviewQueue || reviewQueue.length === 0) {
       viewEl.innerHTML = '<div class="card center"><div class="big">🎉</div>' +
         '<p>当前没有待复习的卡片。</p>' +
@@ -532,6 +563,7 @@
     }
     var card = reviewQueue[0];
     var revealed = !!card._revealed;
+    var order = state.reviewOrder || 'seq';
     var nextHint = '';
     if (card.lastGrade) {
       var lastTxt = card.lastGrade === 5 ? '上次：认识' : card.lastGrade === 3 ? '上次：模糊' : '上次：忘记';
@@ -539,6 +571,11 @@
     }
     viewEl.innerHTML =
       '<div class="prog">待复习 ' + reviewQueue.length + ' 张</div>' +
+      '<div class="rorder"><span class="rolbl">背诵方式</span>' +
+      '<button class="btn small ' + (order === 'seq' ? 'on' : '') + '" data-act="rev-order" data-arg="seq">顺序</button>' +
+      '<button class="btn small ' + (order === 'random' ? 'on' : '') + '" data-act="rev-order" data-arg="random">随机</button>' +
+      '<button class="btn small ' + (order === 'weak' ? 'on' : '') + '" data-act="rev-order" data-arg="weak">薄弱优先</button>' +
+      '</div>' +
       flipCard(card, revealed) +
       nextHint +
       (revealed
@@ -552,7 +589,7 @@
 
   function viewExam() {
     if (!exam) {
-      viewEl.innerHTML = '<div class="card center"><p>从你的卡片里随机抽题自测，每套最多 10 题。</p>' +
+      viewEl.innerHTML = '<div class="card center"><p>从你的卡片里随机抽题自测，<b>不限制题数</b>（全部 ' + state.cards.length + ' 张都会考到）。</p>' +
         '<button class="btn primary" data-act="exam-start">开始模拟考</button></div>';
       return;
     }
@@ -602,15 +639,78 @@
         '<p class="hint">去「录入」加第一张卡片，会自动归到对应的书。</p></div>';
       return;
     }
-    var rows = books.map(function (b) {
-      var cnt = 0;
-      state.cards.forEach(function (c) { if (c.book === b) cnt++; });
-      return '<div class="librow"><div class="libname">' + esc(b) + ' <span class="cnt">' + cnt + '</span></div>' +
-        '<div class="libact"><button class="btn small" data-act="review-book" data-arg="' + esc(b) + '">复习</button>' +
-        '<button class="btn small ghost" data-act="del-book" data-arg="' + esc(b) + '">删</button></div></div>';
-    }).join('');
-    viewEl.innerHTML = '<div class="card">' + rows + '</div>' +
-      '<p class="hint">共 ' + state.cards.length + ' 张卡片，' + books.length + ' 本书。</p>';
+    // 模式一：按书目浏览
+    if (libraryMode === 'books') {
+      var rows = books.map(function (b) {
+        var cnt = 0;
+        state.cards.forEach(function (c) { if (c.book === b) cnt++; });
+        return '<div class="librow"><div class="libname">' + esc(b) + ' <span class="cnt">' + cnt + '</span></div>' +
+          '<div class="libact"><button class="btn small" data-act="review-book" data-arg="' + esc(b) + '">复习</button>' +
+          '<button class="btn small ghost" data-act="del-book" data-arg="' + esc(b) + '">删</button></div></div>';
+      }).join('');
+      viewEl.innerHTML = '<div class="card">' +
+        '<div class="lbl">书架（' + books.length + ' 本 · ' + state.cards.length + ' 张卡）</div>' + rows +
+        '</div>' +
+        '<button class="btn primary" data-act="lib-mode" data-arg="cards">管理卡片（改 / 删 / 批量）</button>';
+      return;
+    }
+    // 模式二：管理卡片（多选、批量删、批量改书目、单卡编辑）
+    var src = manageBook ? state.cards.filter(function (c) { return c.book === manageBook; }) : state.cards;
+    var selCount = 0; Object.keys(manageSel).forEach(function (k) { if (manageSel[k]) selCount++; });
+    var opts = '<option value="">全部书目（' + state.cards.length + '）</option>' +
+      books.map(function (b) { return '<option value="' + esc(b) + '"' + (manageBook === b ? ' selected' : '') + '>' + esc(b) + '</option>'; }).join('');
+    var list = src.length ? src.map(function (c) {
+      var on = !!manageSel[c.id];
+      return '<div class="mgrow' + (on ? ' on' : '') + '">' +
+        '<input type="checkbox" class="mgcb" data-act="mg-toggle" data-arg="' + esc(c.id) + '"' + (on ? ' checked' : '') + '>' +
+        '<div class="mgq"><div class="mgt">' + esc(c.q.slice(0, 60)) + (c.q.length > 60 ? '…' : '') + '</div>' +
+        '<div class="mgb">' + esc(c.book || '未分类') + (c.cloze ? ' · 挖空' : '') + '</div></div>' +
+        '<button class="btn small ghost" data-act="edit-card" data-arg="' + esc(c.id) + '">编辑</button>' +
+        '</div>';
+    }).join('') : '<p class="hint">这本书还没有卡片。</p>';
+    viewEl.innerHTML =
+      '<div class="mgbar">' +
+      '<button class="btn small ' + (selCount === src.length && src.length ? 'on' : '') + '" data-act="mg-all">全选</button>' +
+      '<button class="btn small ghost" data-act="mg-del">删除选中(' + selCount + ')</button>' +
+      '<button class="btn small ghost" data-act="mg-rebook">改书目</button>' +
+      '</div>' +
+      '<div class="card"><select id="mg-book" class="inp">' + opts + '</select></div>' +
+      '<div class="card mglist">' + list + '</div>' +
+      '<button class="btn" data-act="lib-mode" data-arg="books">← 返回书架</button>';
+    var sel = $('mg-book');
+    if (sel) sel.onchange = function () { manageBook = sel.value; render(); };
+  }
+
+  // 编辑单张卡片（弹层）
+  function openEditCard(id) {
+    var c = null; state.cards.forEach(function (x) { if (x.id === id) c = x; });
+    if (!c) return;
+    var books = bookList();
+    var opts = '<option value="">（未分类）</option>' + books.map(function (b) { return '<option value="' + esc(b) + '"' + (c.book === b ? ' selected' : '') + '>' + esc(b) + '</option>'; }).join('');
+    overlayEl.innerHTML =
+      '<div class="sheet"><div class="sh"><h3>编辑卡片</h3><button class="close" data-act="cancel-edit">×</button></div>' +
+      '<div class="body">' +
+      '<label class="lbl">所属书 / 科目（必填）</label>' +
+      '<input id="ed-book" list="ed-bookopts" class="inp" value="' + esc(c.book || '') + '">' +
+      '<datalist id="ed-bookopts">' + books.map(function (b) { return '<option value="' + esc(b) + '">'; }).join('') + '</datalist>' +
+      '<label class="lbl">正面（问题）</label>' +
+      '<textarea id="ed-q" class="inp area">' + esc(c.q) + '</textarea>' +
+      '<label class="lbl">背面（答案）</label>' +
+      '<textarea id="ed-a" class="inp area">' + esc(c.a) + '</textarea>' +
+      '<input type="hidden" id="ed-id" value="' + esc(c.id) + '">' +
+      '</div>' +
+      '<div class="foot"><button class="btn ghost" data-act="cancel-edit">取消</button>' +
+      '<button class="btn primary" data-act="save-edit">保存</button></div></div>';
+    overlayEl.classList.remove('hidden'); overlayEl.classList.add('show');
+  }
+  function saveEditCard() {
+    var id = val('ed-id'); var book = val('ed-book').trim(); var q = val('ed-q').trim(); var a = val('ed-a').trim();
+    if (!book) { toast('所属书/科目为必填'); return; }
+    if (!q) { toast('正面不能为空'); return; }
+    var c = null; state.cards.forEach(function (x) { if (x.id === id) c = x; });
+    if (!c) { closeImportModal(); return; }
+    c.book = book; c.q = q; c.a = a;
+    save(); closeImportModal(); toast('已保存 ✓'); render();
   }
 
   function viewMine() {
@@ -657,6 +757,11 @@
       '<button class="btn" data-act="export">导出备份(JSON)</button>' +
       '<button class="btn" data-act="import">导入备份</button>' +
       '<input type="file" id="importer" accept=".json,application/json" hidden>' +
+      '</div>' +
+      '<div class="card danger">' +
+      '<div class="lbl">清除本机数据（慎用）</div>' +
+      '<p class="hint">会清空本设备上的登录信息、自动登录状态与本地卡片缓存（云端数据不受影响）。通常在换手机、彻底重来时用。日常退出登录不会丢卡片，请勿点错。</p>' +
+      '<button class="btn bad" data-act="wipe-local">清除本机数据</button>' +
       '</div>' +
       '<div class="card">' +
       '<div class="lbl">AI 解析配置（可选）</div>' +
@@ -744,10 +849,44 @@
   function handle(act, arg, t) {
     if (act === 'tab') { show(arg); return; }
 
+    // 书库：切换「按书目 / 管理卡片」模式
+    if (act === 'lib-mode') { libraryMode = arg; manageSel = {}; render(); return; }
+    if (act === 'mg-toggle') { manageSel[arg] = !manageSel[arg]; render(); return; }
+    if (act === 'mg-all') {
+      var srcAll = manageBook ? state.cards.filter(function (c) { return c.book === manageBook; }) : state.cards;
+      var allOn = srcAll.length && srcAll.every(function (c) { return manageSel[c.id]; });
+      srcAll.forEach(function (c) { manageSel[c.id] = !allOn; });
+      render(); return;
+    }
+    if (act === 'mg-del') {
+      var ids = Object.keys(manageSel).filter(function (k) { return manageSel[k]; });
+      if (!ids.length) { toast('先勾选要删除的卡片'); return; }
+      if (!confirm('确定删除选中的 ' + ids.length + ' 张卡片？此操作不可恢复')) return;
+      var set = {}; ids.forEach(function (k) { set[k] = true; });
+      state.cards = state.cards.filter(function (c) { return !set[c.id]; });
+      manageSel = {}; save(); toast('已删除 ' + ids.length + ' 张'); render(); return;
+    }
+    if (act === 'mg-rebook') {
+      var ids2 = Object.keys(manageSel).filter(function (k) { return manageSel[k]; });
+      if (!ids2.length) { toast('先勾选要修改的卡片'); return; }
+      var nb = prompt('把选中的 ' + ids2.length + ' 张卡片归入哪本书？输入书名：', manageBook || '');
+      if (nb === null) return;
+      nb = nb.trim(); if (!nb) { toast('书名不能为空'); return; }
+      var set2 = {}; ids2.forEach(function (k) { set2[k] = true; });
+      state.cards.forEach(function (c) { if (set2[c.id]) c.book = nb; });
+      manageSel = {}; save(); toast('已改 ' + ids2.length + ' 张到《' + nb + '》'); render(); return;
+    }
+    if (act === 'edit-card') { openEditCard(arg); return; }
+    if (act === 'save-edit') { saveEditCard(); return; }
+    if (act === 'cancel-edit') { closeImportModal(); return; }
+    // 复习顺序：顺序 / 随机 / 薄弱优先
+    if (act === 'rev-order') { state.reviewOrder = arg; applyReviewOrder(); render(); return; }
+
     if (act === 'add') {
       var book = val('f-book').trim();
       var q = val('f-q').trim();
       var a = val('f-a').trim();
+      if (!book) { toast('请先填「所属书/科目」（必填）'); return; }
       if (!q || !a) { toast('问题和答案都要填'); return; }
       state.cards.push(newCard(book, q, a));
       save();
@@ -759,6 +898,7 @@
 
     if (act === 'batch') {
       var bbook = val('f-book').trim();
+      if (!bbook) { toast('批量导入请先填「所属书/科目」（必填）'); return; }
       var lines = val('f-batch').split(/\n+/);
       var n = 0;
       lines.forEach(function (line) {
@@ -840,11 +980,11 @@
       render(); return;
     }
 
-    if (act === 'review-all') { reviewQueue = state.cards.slice(); render(); return; }
+    if (act === 'review-all') { reviewQueue = null; reviewSource = state.cards.slice(); applyReviewOrder(); render(); return; }
     if (act === 'review-book') {
-      reviewQueue = state.cards.filter(function (c) { return c.book === arg; });
-      if (!reviewQueue.length) { toast('这本书还没有卡片'); reviewQueue = null; return; }
-      show('review'); return;
+      var rb = state.cards.filter(function (c) { return c.book === arg; });
+      if (!rb.length) { toast('这本书还没有卡片'); return; }
+      reviewQueue = null; reviewSource = rb; applyReviewOrder(); show('review'); return;
     }
     if (act === 'del-book') {
       if (!confirm('删除《' + arg + '》及其所有卡片？此操作不可恢复')) return;
@@ -859,7 +999,7 @@
         var j = Math.floor(Math.random() * (i + 1));
         var tmp = pool[i]; pool[i] = pool[j]; pool[j] = tmp;
       }
-      var cnt = Math.min(10, pool.length);
+      var cnt = pool.length;   // 不限制题数：全部卡片都考
       exam = { queue: pool.slice(0, cnt), idx: 0, score: 0, revealed: false };
       render(); return;
     }
@@ -876,6 +1016,17 @@
     if (act === 'theme') { state.theme = arg; save(); applyTheme(); render(); return; }
 
     if (act === 'export') { exportData(); return; }
+    if (act === 'wipe-local') {
+      if (!confirm('确定清除本机数据？将删除本设备登录、自动登录与本地卡片缓存（云端数据不受影响）。')) return;
+      try {
+        localStorage.removeItem(LOCAL_AUTH_KEY); localStorage.removeItem(AUTO_KEY);
+        localStorage.removeItem(GITHUB_KEY); localStorage.removeItem(SESSION_KEY);
+        var k = dataKey(currentAccount || (localAuthGet() && localAuthGet().account) || '');
+        if (k) localStorage.removeItem(k);
+        localStorage.removeItem(LOCAL_KEY);
+      } catch (e) {}
+      location.reload(); return;
+    }
     if (act === 'import') {
       var inp = $('importer'); if (!inp) return;
       inp.onchange = function () { if (inp.files && inp.files[0]) importData(inp.files[0]); };
@@ -1030,7 +1181,7 @@
       '<div class="sheet">' +
       '<div class="sh"><h3>文档导入</h3><button class="close" data-act="close-overlay">×</button></div>' +
       '<div class="body">' +
-      '<label class="lbl">归入书目（可选）</label>' +
+      '<label class="lbl">归入书目（必填）</label>' +
       '<input id="imp-book" class="inp" value="' + esc(importState.book) + '" placeholder="如：中级会计">' +
       '<label class="lbl">原文（可直接编辑、选中你要的部分）</label>' +
       '<textarea id="raw-text" class="raw">' + esc(importState.text) + '</textarea>' +
@@ -1260,6 +1411,7 @@
   }
   function confirmImport() {
     var book = val('imp-book').trim(); var n = 0;
+    if (!book) { toast('请先填「归入书目」（必填）'); return; }
     if (!importState.preview.length) {
       // 兜底：识别不出结构时，把原文整段作为一张笔记卡，保证“下一步”永远能走
       var raw = (importState.text || '').trim();

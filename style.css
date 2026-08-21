@@ -148,3 +148,27 @@ body{
 .mode{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0;}
 .btn.small{font-size:12px;padding:8px 10px;border:1px solid var(--line);background:var(--bg);color:var(--text);}
 .btn.small.on{background:var(--primary);color:#fff;border-color:var(--primary);}
+
+/* 必填标记 */
+.req{color:#e25555;font-size:12px;font-weight:600;}
+
+/* 复习方式切换 */
+.rorder{display:flex;align-items:center;gap:6px;margin-bottom:12px;flex-wrap:wrap;}
+.rorder .rolbl{font-size:12px;color:var(--muted);}
+.rorder .btn{margin:0;}
+
+/* 批量管理卡片 */
+.mgbar{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap;}
+.mgbar .btn{margin:0;flex:1;min-width:80px;}
+.mglist .mgrow{display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--border);}
+.mglist .mgrow:last-child{border-bottom:none;}
+.mglist .mgrow.on{background:rgba(33,181,166,.06);}
+.mglist .mgcb{width:20px;height:20px;flex:none;accent-color:var(--primary);}
+.mglist .mgq{flex:1;min-width:0;}
+.mglist .mgt{font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.mglist .mgb{font-size:12px;color:var(--muted);margin-top:2px;}
+.mglist .mgrow .btn{margin:0;flex:none;}
+
+/* 危险操作卡片 */
+.card.danger{border:1px solid #f0c0c0;}
+.card.danger .btn.bad{background:#e25555;margin-top:8px;}
