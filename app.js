@@ -158,13 +158,15 @@
     try { json = JSON.stringify(d); } catch (e) {}
     if (MODE === 'github') {
       // GitHub 模式以仓库文件为权威存储；localStorage 只是离线缓存。
-      // 如果数据太大，跳过本地缓存避免主线程卡死和超出配额。
-      if (json && json.length <= 800000) {
-        try { localStorage.setItem(dataKey(currentAccount), json); } catch (e) {}
-      } else if (json) {
-        try { localStorage.setItem(dataKey(currentAccount) + '_meta', JSON.stringify({ savedAt: Date.now(), size: json.length })); } catch (e) {}
+      // 给数据打上保存时间戳，刷新时与云端比“谁更新”取较新一份，避免云端慢导致丢卡。
+      d._savedAt = Date.now();
+      var j2 = JSON.stringify(d);
+      if (j2 && j2.length <= 800000) {
+        try { localStorage.setItem(dataKey(currentAccount), j2); } catch (e) {}
+      } else if (j2) {
+        try { localStorage.setItem(dataKey(currentAccount) + '_meta', JSON.stringify({ savedAt: Date.now(), size: j2.length })); } catch (e) {}
       }
-      return ghSave(d, json);
+      return ghSave(d, j2);
     }
     if (json) {
       try { localStorage.setItem(dataKey(currentAccount), json); } catch (e) { toast('保存失败：存储可能已满'); }
@@ -183,6 +185,10 @@
       var c = ghCfg();
       if (!c || !c.token || !c.user || !c.repo || !c.account) return Promise.resolve(localCache);
       return ghLoad().then(function (cloud) {
+        var cT = (cloud && cloud._savedAt) || 0;
+        var lT = (localCache && localCache._savedAt) || 0;
+        // 本地较新（刚导入/编辑但云端还没同步完）→ 用本地，避免刷新丢卡
+        if (lT >= cT && localCache && (localCache.cards || []).length) return localCache;
         if (cloud && (cloud.cards || cloud.books || cloud.checkins)) return cloud;
         return localCache;
       }).catch(function () { return localCache; });
@@ -200,19 +206,30 @@
   function ghSave(d, prejson) {
     var c = ghCfg();
     if (!c || !c.token || !c.user || !c.repo || !c.account) return Promise.resolve({});
-    var sha;
     var path = 'data/' + encodeURIComponent(c.account) + '.json';
     var api = 'https://api.github.com/repos/' + c.user + '/' + c.repo + '/contents/' + path;
     var headers = { 'Authorization': 'token ' + c.token, 'Accept': 'application/vnd.github+json' };
     var content = utf8ToBase64(prejson || JSON.stringify(d));
-    return fetch(api, { headers: headers })
-      .then(function (r) { if (r.status === 200) return r.json().then(function (j) { sha = j.sha; }); return null; })
-      .then(function () {
-        return fetch(api, { method: 'PUT', headers: headers, 'Content-Type': 'application/json',
-          body: JSON.stringify({ message: 'backup ' + c.account + ' ' + new Date().toISOString(), content: content, sha: sha }) });
-      })
+    // 15 秒硬超时：宁可放弃云端，也绝不卡住界面
+    var ctrl = ('AbortController' in window) ? new AbortController() : null;
+    var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, 15000) : null;
+    function clearT() { if (timer) clearTimeout(timer); }
+    function getSha() {
+      return fetch(api, { headers: headers, signal: ctrl ? ctrl.signal : undefined })
+        .then(function (r) { if (r.status === 200) return r.json().then(function (j) { return j.sha; }); return null; });
+    }
+    function put(sha) {
+      return fetch(api, { method: 'PUT', headers: headers, 'Content-Type': 'application/json', signal: ctrl ? ctrl.signal : undefined,
+        body: JSON.stringify({ message: 'backup ' + c.account + ' ' + new Date().toISOString(), content: content, sha: sha }) });
+    }
+    return getSha().then(function (sha) { return put(sha); })
       .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return { _status: r.status }; })
-      .catch(function (e) { toast('GitHub 备份失败（离线时本地数据仍有效）'); return {}; });
+      .then(function (res) { clearT(); return res; }, function (e) {
+        clearT();
+        if (e && e.name === 'AbortError') toast('云端同步超时（已存本地，稍后自动重试）');
+        else if (e && e.message) toast('GitHub 备份失败：' + e.message + '（本地数据仍有效）');
+        return {}; // 永不 reject，避免上层界面卡死
+      });
   }
   function ghLoad() {
     var c = ghCfg();
@@ -275,7 +292,11 @@
 
     viewEl.addEventListener('click', onClick);
     tabEl.addEventListener('click', onClick);
-    if (overlayEl) overlayEl.addEventListener('click', function (e) { if (e.target === overlayEl) closeImportModal(); });
+    if (overlayEl) {
+      // 弹窗里的按钮（解析/确认导入/关闭等）也要能触发 onClick，否则点了没反应
+      overlayEl.addEventListener('click', onClick);
+      overlayEl.addEventListener('click', function (e) { if (e.target === overlayEl) closeImportModal(); });
+    }
 
     // 托管在 GitHub Pages 上 → 强制云端同步模式
     if (location.hostname.indexOf('github.io') >= 0 || location.hostname.indexOf('githubusercontent.com') >= 0) {
@@ -1245,29 +1266,26 @@
       if (raw) {
         var fc = newCard(book, '导入的整段笔记', raw);
         state.cards.push(fc); n = 1;
-        closeImportModal(); render();
-        save(); toast('未识别到结构，已整段导入 1 张（可在书库里手动拆分）');
-      } else { toast('没有可导入的内容'); closeImportModal(); render(); return; }
+        commitImport(n, '未识别到结构，已整段导入 1 张（可在书库里手动拆分）');
+      } else { toast('没有可导入的内容'); closeImportModal(); render(); }
       return;
     }
-    // 批量导入：先关闭弹窗并显示加载，避免 94 张大段文本同步保存卡死主线程
     importState.preview.forEach(function (it) {
       if (!it.q) return;
       var c = newCard(book, it.q.trim(), it.a.trim());
       if (it.cloze) { c.cloze = true; c.points = it.points || []; }
       state.cards.push(c); n++;
     });
+    commitImport(n, '已导入 ' + n + ' 张卡片 ✓');
+  }
+  // 本地同步秒存（极快）→ 立刻关弹窗 + 刷新界面 + 给反馈 → 云端后台静默同步（带超时，失败也不影响本地）
+  function commitImport(n, msg) {
+    state._savedAt = Date.now();
+    try { localStorage.setItem(dataKey(currentAccount), JSON.stringify(state)); } catch (e) {}
     closeImportModal();
-    showLoading('正在保存 ' + n + ' 张卡片…');
-    // 把重活推到下一帧，让加载动画先画出来；直接调用 saveData 不走 300ms 防抖
-    setTimeout(function () {
-      state.cards.forEach(function (c) { delete c._revealed; });
-      saveData(state).then(function () {
-        render(); hideLoading(); if (n) toast('已导入 ' + n + ' 张卡片');
-      }).catch(function () {
-        render(); hideLoading(); toast('导入完成，但云端备份失败');
-      });
-    }, 40);
+    render();
+    toast(msg || ('已导入 ' + n + ' 张卡片 ✓'));
+    if (MODE === 'github') { ghSave(state).catch(function () {}); }  // 后台同步，不阻塞
   }
 
   /* ---------- 备份 ---------- */
