@@ -173,11 +173,13 @@
       } else if (j2) {
         try { localStorage.setItem(dataKey(currentAccount) + '_meta', JSON.stringify({ savedAt: Date.now(), size: j2.length })); } catch (e) {}
       }
+      idbBackup(d);
       return ghSave(d, j2);
     }
     if (json) {
       try { localStorage.setItem(dataKey(currentAccount), json); } catch (e) { toast('保存失败：存储可能已满'); }
     }
+    idbBackup(d);
     return Promise.resolve({});
   }
   function loadData() {
@@ -231,10 +233,13 @@
     }
     return getSha().then(function (sha) { return put(sha); })
       .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return { _status: r.status }; })
-      .then(function (res) { clearT(); return res; }, function (e) {
+      .then(function (res) { clearT(); setSyncStatus(true, '已写入云端 ' + c.account); return res; }, function (e) {
         clearT();
-        if (e && e.name === 'AbortError') toast('云端同步超时（已存本地，稍后自动重试）');
-        else if (e && e.message) toast('GitHub 备份失败：' + e.message + '（本地数据仍有效）');
+        var msg = (e && e.name === 'AbortError')
+          ? '云端同步超时（已存本机，稍后自动重试）'
+          : ('GitHub 备份失败：' + (e && e.message || '未知错误') + '（本机数据仍有效）');
+        setSyncStatus(false, (e && e.message) || '未知错误');
+        toast(msg);
         return {}; // 永不 reject，避免上层界面卡死
       });
   }
@@ -254,6 +259,79 @@
         return emptyState();
       })
       .catch(function (e) { toast('GitHub 读取失败，使用本地数据'); return emptyState(); });
+  }
+  /* ---------- 本机 IndexedDB 多副本备份（独立于 localStorage，抗单点损坏、可回滚） ---------- */
+  var IDB_NAME = 'beiji_backup_v1', IDB_STORE = 'snap', DEPLOY_USER = 'appleagainjie', DEPLOY_REPO = 'beijiuan';
+  var SYNC_KEY = 'beiji_sync_v1';
+  function setSyncStatus(ok, info) {
+    try { localStorage.setItem(SYNC_KEY, JSON.stringify({ ok: ok, info: info || '', at: Date.now() })); } catch (e) {}
+  }
+  function idbOpen() {
+    return new Promise(function (res, rej) {
+      if (!('indexedDB' in window)) { rej(new Error('no-idb')); return; }
+      try {
+        var req = indexedDB.open(IDB_NAME, 1);
+        req.onupgradeneeded = function () {
+          var db = req.result;
+          if (!db.objectStoreNames.contains(IDB_STORE)) db.createObjectStore(IDB_STORE, { keyPath: 'k' });
+        };
+        req.onsuccess = function () { res(req.result); };
+        req.onerror = function () { rej(req.error || new Error('open-fail')); };
+      } catch (e) { rej(e); }
+    });
+  }
+  function idbPut(rec) {
+    return idbOpen().then(function (db) {
+      return new Promise(function (res, rej) {
+        try {
+          var tx = db.transaction(IDB_STORE, 'readwrite');
+          tx.objectStore(IDB_STORE).put(rec);
+          tx.oncomplete = function () { res(true); };
+          tx.onerror = function () { rej(tx.error || new Error('put-fail')); };
+        } catch (e) { rej(e); }
+      });
+    });
+  }
+  function idbSnapshots(account, limit) {
+    return idbOpen().then(function (db) {
+      return new Promise(function (res, rej) {
+        try {
+          var tx = db.transaction(IDB_STORE, 'readonly');
+          var out = [];
+          tx.objectStore(IDB_STORE).openCursor().onsuccess = function (e) {
+            var cur = e.target.result;
+            if (cur) { if (!account || cur.value.account === account) out.push(cur.value); cur.continue(); }
+            else { out.sort(function (a, b) { return b.savedAt - a.savedAt; }); if (limit && out.length > limit) out = out.slice(0, limit); res(out); }
+          };
+          tx.onerror = function () { rej(tx.error || new Error('cursor-fail')); };
+        } catch (e) { rej(e); }
+      });
+    });
+  }
+  // 写一份快照并仅保留该账户最近 5 份
+  function idbBackup(d) {
+    var acc = currentAccount || (localAuthGet() && localAuthGet().account) || 'default';
+    var savedAt = Date.now();
+    var rec = { k: acc + '_' + savedAt, account: acc, savedAt: savedAt, data: JSON.parse(JSON.stringify(d)) };
+    return idbPut(rec).then(function () {
+      return idbSnapshots(acc).then(function (list) {
+        if (list.length <= 5) return true;
+        var old = list.slice(5);
+        return idbOpen().then(function (db) {
+          return new Promise(function (res) {
+            try {
+              var tx = db.transaction(IDB_STORE, 'readwrite');
+              old.forEach(function (o) { tx.objectStore(IDB_STORE).delete(o.k); });
+              tx.oncomplete = function () { res(true); };
+              tx.onerror = function () { res(false); };
+            } catch (e) { res(false); }
+          });
+        });
+      });
+    }).catch(function () { return false; });
+  }
+  function idbLatest(account) {
+    return idbSnapshots(account).then(function (list) { return list && list.length ? list[0] : null; });
   }
   function save() {
     // 剥离会话级临时字段
@@ -916,25 +994,35 @@
       '<button class="btn primary" data-act="save-ai">保存 AI 配置</button>' +
       '</div>' +
       '<div class="card">' +
-      '<div class="lbl">云端同步（GitHub，可选）</div>' +
-      '<p class="hint">填入你的 GitHub 个人访问令牌（PAT，需 repo 权限）后，数据会<b>自动备份到你私有仓库</b>，手机在外也能拉取。令牌只存在本机，不会写入代码。</p>' +
-      '<label class="lbl">GitHub 用户名</label>' +
-      '<input id="gh-user" class="inp" placeholder="如 appleagainjie" value="' + esc(gc.user || 'appleagainjie') + '">' +
-      '<label class="lbl">数据仓库名（私人仓库，已为你建好）</label>' +
-      '<input id="gh-repo" class="inp" placeholder="beiji-data" value="' + esc(gc.repo || 'beiji-data') + '">' +
-      '<label class="lbl">个人访问令牌 PAT（需 repo 权限）</label>' +
-      '<input id="gh-token" type="password" class="inp" placeholder="ghp_... 或 github_pat_...">' +
-      '<p class="hint">数据账户名取自你的登录账号：<b>' + esc(currentAccount || (localAuthGet() && localAuthGet().account) || '（未登录）') + '</b>，无需在此填。</p>' +
-      '<div class="ghbtns"><button class="btn primary" data-act="save-gh">保存云端配置</button>' +
-      '<button class="btn" data-act="test-gh">测试连接</button>' +
+      '<div class="lbl">云端同步（GitHub 双保险 · 必开）</div>' +
+      (MODE === 'github'
+        ? '<p class="hint">你已部署在 GitHub Pages，云端仓库锁定为 <b>' + DEPLOY_USER + '/' + DEPLOY_REPO + '</b>。只需填一次下方令牌，之后<b>每次保存都会自动双写：本机 + 云端</b>，换手机/清缓存都不丢。</p>'
+        : '<p class="hint">填入 GitHub 令牌（需 repo 权限）后，数据自动备份到你的仓库。令牌只存本机，不写代码。</p>') +
+      (MODE === 'github'
+        ? ''
+        : '<label class="lbl">GitHub 用户名</label>' +
+          '<input id="gh-user" class="inp" placeholder="如 appleagainjie" value="' + esc(gc.user || DEPLOY_USER) + '">' +
+          '<label class="lbl">数据仓库名</label>' +
+          '<input id="gh-repo" class="inp" placeholder="beijiuan" value="' + esc(gc.repo || DEPLOY_REPO) + '">') +
+      '<label class="lbl">个人访问令牌 PAT（需 repo 权限，仅填一次）</label>' +
+      '<input id="gh-token" type="password" class="inp" placeholder="ghp_... 或 github_pat_..." value="' + (gc.token ? '（已保存）' : '') + '">' +
+      '<p class="hint">数据按你的登录账号分文件存储：<b>' + esc(currentAccount || (localAuthGet() && localAuthGet().account) || '（未登录）') + '</b>。令牌生成：GitHub→右上角头像→Settings→Developer settings→Personal access tokens→Generate new token(classic)，勾 repo，生成后粘贴。</p>' +
+      '<div class="ghbtns"><button class="btn primary" data-act="save-gh">保存并开启云端</button>' +
       '<button class="btn" data-act="backup-gh">立即备份</button></div>' +
       '<p class="hint" id="gh-status"></p>' +
+      '<p class="hint" id="sync-status"></p>' +
+      '</div>' +
+      '<div class="card">' +
+      '<div class="lbl">本机备份（IndexedDB · 抗损坏可回滚）</div>' +
+      '<p class="hint" id="idb-status">每次保存会自动在本机再存一份历史快照（保留最近 5 份，独立于浏览器缓存）。</p>' +
+      '<button class="btn" data-act="restore-idb">恢复最近一份本机备份</button>' +
       '</div>' +
       ((MODE === 'github' && ghCfg() && ghCfg().token)
-        ? '<p class="hint">✅ 云端同步已开启：数据自动存到你的 GitHub 私有仓库（账户：' + esc(ghCfg() ? ghCfg().account : '') + '），手机在外也能拉取，本地也保留一份兜底。</p>'
+        ? '<p class="hint">✅ 云端同步已开启：数据自动双写到本机 + 云端仓库 <b>' + DEPLOY_USER + '/' + DEPLOY_REPO + '</b>（账户：' + esc(ghCfg() ? ghCfg().account : '') + '）。</p>'
         : MODE === 'server'
-        ? '<p class="hint">数据存在本机 E 盘文件里（账户：' + esc(session.username) + '），清浏览器缓存也不会丢。换设备需重新登录同一账户。</p>'
-        : '<p class="hint">当前为单人模式，数据存在这台设备的浏览器里。换手机、清缓存会丢，记得常导出备份，或去上方开启 GitHub 云端同步。</p>');
+        ? '<p class="hint">数据存在本机 E 盘文件里（账户：' + esc(session.username) + '）。</p>'
+        : '<p class="hint">⚠️ 当前云端未开启，数据只在本机。填上方令牌开启双保险。</p>');
+    setTimeout(refreshBackupStatus, 30);
     var imp = $('importer');
     if (imp) imp.onchange = function () { if (imp.files && imp.files[0]) importData(imp.files[0]); };
   }
@@ -1107,13 +1195,16 @@
       save(); toast('AI 配置已保存'); return;
     }
     if (act === 'save-gh') {
-      var guser = val('gh-user').trim(), grepo = val('gh-repo').trim(), gtoken = val('gh-token').trim();
+      var gtoken = val('gh-token').trim();
+      var guser = MODE === 'github' ? DEPLOY_USER : val('gh-user').trim();
+      var grepo = MODE === 'github' ? DEPLOY_REPO : val('gh-repo').trim();
       var gs = $('gh-status');
-      if (!guser || !grepo || !gtoken) { if (gs) gs.textContent = '用户名、仓库名、令牌都要填'; toast('请填完整'); return; }
+      if (!gtoken) { if (gs) gs.textContent = '请先填令牌'; toast('请先填令牌'); return; }
+      if (MODE !== 'github' && (!guser || !grepo)) { if (gs) gs.textContent = '用户名、仓库名都要填'; toast('请填完整'); return; }
       var cur = currentAccount || (localAuthGet() && localAuthGet().account) || '默认账户';
       setGhCfg({ user: guser, repo: grepo, token: gtoken, account: cur });
       MODE = 'github';
-      toast('已保存云端配置，正在从 GitHub 载入该账户数据…');
+      toast('已开启云端，正在从 GitHub 载入该账户数据…');
       loadData().then(enterApp);
       return;
     }
@@ -1207,6 +1298,44 @@
       var inp = $('importer'); if (!inp) return;
       inp.onchange = function () { if (inp.files && inp.files[0]) importData(inp.files[0]); };
       inp.click(); return;
+    }
+    if (act === 'restore-idb') {
+      var racc = currentAccount || (localAuthGet() && localAuthGet().account) || 'default';
+      idbLatest(racc).then(function (snap) {
+        if (!snap) { toast('没有可用的本机备份'); return; }
+        var when = new Date(snap.savedAt).toLocaleString();
+        if (!confirm('恢复到 ' + when + ' 的本机备份？将覆盖当前 ' + state.cards.length + ' 张卡片。')) return;
+        var d = snap.data || {};
+        state.cards = (d.cards || []).map(normalizeCard);
+        state.checkins = Array.isArray(d.checkins) ? d.checkins : [];
+        state.countdowns = Array.isArray(d.countdowns) ? d.countdowns : [];
+        save(); toast('已从本机备份恢复 ✓');
+        exam = null; reviewQueue = null; render();
+      }).catch(function () { toast('读取本机备份失败'); });
+      return;
+    }
+  }
+  function refreshBackupStatus() {
+    var ss = $('sync-status');
+    if (ss) {
+      try {
+        var s = JSON.parse(localStorage.getItem(SYNC_KEY) || 'null');
+        if (s) {
+          var t = new Date(s.at).toLocaleString();
+          ss.innerHTML = (s.ok ? '🟢 云端上次同步成功：' : '🔴 云端上次同步失败：') + t + (s.info ? '（' + esc(s.info) + '）' : '');
+          ss.style.color = s.ok ? '#1a9e5b' : '#d23';
+        } else { ss.textContent = 'ℹ️ 云端尚未同步过（请先填令牌开启）。'; }
+      } catch (e) {}
+    }
+    var is = $('idb-status');
+    if (is) {
+      var acc = currentAccount || (localAuthGet() && localAuthGet().account) || 'default';
+      idbSnapshots(acc, 1).then(function (list) {
+        if (list && list.length) {
+          is.innerHTML = '🟢 本机最近备份：' + new Date(list[0].savedAt).toLocaleString() + '（共 ' + list.length + ' 份，保留最近 5 份）。';
+          is.style.color = '#1a9e5b';
+        } else { is.textContent = 'ℹ️ 本机暂无备份（操作后自动生成）。'; }
+      }).catch(function () { is.textContent = 'ℹ️ 本机备份不可用（浏览器不支持 IndexedDB）。'; });
     }
   }
 
