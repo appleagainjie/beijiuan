@@ -37,6 +37,9 @@
   var libraryMode = 'books';               // 书库页：'books' 按书目 | 'cards' 管理卡片
   var manageSel = {};                      // 管理卡片：已选中的卡片 id -> true
   var manageBook = '';                     // 管理卡片：按书目筛选（'' = 全部）
+  var previewBook = '';                    // 书库预览：当前正在预览的书（非空则书库页显示预览列表）
+  var reviewSetupPending = false;          // 复习页：是否等待用户在「今日复习计划」确认开始（墨墨式选书 + 选起点）
+  var reviewBookSel = {};                  // 复习计划：各书是否勾选今天背（true = 背）
   function ghCfg() { try { return JSON.parse(localStorage.getItem(GITHUB_KEY) || 'null'); } catch (e) { return null; } }
   function setGhCfg(c) { try { localStorage.setItem(GITHUB_KEY, JSON.stringify(c)); } catch (e) {} }
   function utf8ToBase64(str) {
@@ -536,6 +539,19 @@
     });
     return { retention: total ? correct / total : 0.9, total: total };
   }
+  // 你已坚持复习的天数（按复习历史里最早一条算起），用于记忆曲线的“时间跨度”
+  function usedDays() {
+    var first = Infinity;
+    state.cards.forEach(function (c) { (c.hist || []).forEach(function (h) { if (h.t < first) first = h.t; }); });
+    if (first === Infinity) return 0;
+    return Math.ceil((Date.now() - first) / DAY) + 1;
+  }
+  // 平均稳定度（天）：你全库卡片稳定度的均值，越用越大 → 复习间隔越长、推送越准
+  function avgStability() {
+    var s = 0, n = 0;
+    state.cards.forEach(function (c) { if (c.hist && c.hist.length) { s += (c.stability || 1); n++; } });
+    return n ? Math.round(s / n * 10) / 10 : 0;
+  }
   function grade(card, q, rtMs) {
     q = Math.min(4, Math.max(1, parseInt(q, 10) || 1));
     var now = Date.now();
@@ -889,8 +905,8 @@
   function show(name) {
     view = name;
     if (name === 'review') {
-      if (!reviewSource || !reviewSource.length) reviewSource = (dueCards().length ? dueCards() : state.cards.slice());
-      if (!reviewQueue) applyReviewOrder();
+      // 进入复习：若没有正在进行的某一轮，先展示「今日复习计划」，让用户选书 + 选起点（墨墨背单词式）
+      if (!reviewQueue) reviewSetupPending = true;
     }
     render();
   }
@@ -954,6 +970,7 @@
   }
 
   function viewReview() {
+    if (reviewSetupPending) { renderReviewPlan(); return; }
     if (!reviewQueue) { if (!reviewSource || !reviewSource.length) reviewSource = (dueCards().length ? dueCards() : state.cards.slice()); applyReviewOrder(); }
     var goal = (state.dailyGoal && state.dailyGoal.review) || 0;
     var done = todayReviewedCount();
@@ -1013,6 +1030,43 @@
         : '<button class="btn primary" data-act="reveal">显示答案</button>');
   }
 
+  // 今日复习计划（墨墨背单词式）：聚合所有到期卡 → 勾选今天要背的书 → 选起点 → 开始
+  function renderReviewPlan() {
+    var due = dueCards();
+    var byBook = {};
+    due.forEach(function (c) { var b = c.book || '未分类'; byBook[b] = (byBook[b] || 0) + 1; });
+    var books = Object.keys(byBook).sort();
+    if (!books.length) {
+      viewEl.innerHTML = countdownBarHtml() +
+        '<div class="card center"><div class="big">🌿</div>' +
+        '<p>今天暂时没有「到期」的卡片。</p>' +
+        '<p class="hint">想巩固就把全部卡片混在一起过一遍：</p>' +
+        '<button class="btn primary" data-act="plan-start" data-arg="all">复习全部卡片</button>' +
+        '<button class="btn" data-act="plan-cancel">暂不复习</button></div>';
+      return;
+    }
+    if (!reviewBookSel || Object.keys(reviewBookSel).length === 0) {
+      reviewBookSel = {}; books.forEach(function (b) { reviewBookSel[b] = true; });
+    }
+    var selDue = books.reduce(function (s, b) { return s + (reviewBookSel[b] ? byBook[b] : 0); }, 0);
+    var rows = books.map(function (b) {
+      return '<label class="planrow"><span class="libname">' + esc(b) + ' <span class="cnt">' + byBook[b] + ' 张到期</span></span>' +
+        '<input type="checkbox" data-act="plan-book" data-arg="' + esc(b) + '"' + (reviewBookSel[b] ? ' checked' : '') + '></label>';
+    }).join('');
+    viewEl.innerHTML = countdownBarHtml() +
+      '<div class="card"><div class="lbl">今日复习计划</div>' +
+      '<p class="hint">今天共 <b>' + due.length + '</b> 张到期，分布在 <b>' + books.length + '</b> 本书里。' +
+      '勾选你今天想背的书，再选从第几张开始（像墨墨背单词一样自己安排）。</p>' +
+      rows +
+      '<div class="rstart"><span class="rolbl">从哪开始</span>' +
+      '<span>从第</span><input id="plan-start-in" class="num" type="number" min="1" value="1">' +
+      '<span>张开始（共选中 ' + selDue + ' 张）</span></div>' +
+      '<button class="btn primary" data-act="plan-start" data-arg="due">开始复习（' + selDue + ' 张）</button>' +
+      '<button class="btn" data-act="plan-review-all">不限到期 · 复习全部卡片</button>' +
+      '</div>' +
+      '<button class="btn" data-act="plan-cancel">暂不复习</button>';
+  }
+
   function viewExam() {
     if (!exam) {
       var goal = (state.dailyGoal && state.dailyGoal.exam) || 0;
@@ -1070,6 +1124,7 @@
   }
 
   function viewLibrary() {
+    if (previewBook) { viewLibraryPreview(); return; }
     var books = bookList();
     if (books.length === 0) {
       viewEl.innerHTML = '<div class="card center"><p>还没有任何书。</p>' +
@@ -1116,6 +1171,29 @@
       '<button class="btn" data-act="lib-mode" data-arg="books">← 返回书架</button>';
     var sel = $('mg-book');
     if (sel) sel.onchange = function () { manageBook = sel.value; render(); };
+  }
+
+  // 书库预览：点「复习」后先看这本书全部卡片，再决定从第几张开始
+  function viewLibraryPreview() {
+    var book = previewBook;
+    var cards = state.cards.filter(function (c) { return c.book === book; });
+    if (!cards.length) { previewBook = ''; render(); return; }
+    var list = cards.map(function (c, i) {
+      var a = c.a || ''; if (a.length > 120) a = a.slice(0, 120) + '…';
+      return '<div class="prevcard"><div class="prevno">#' + (i + 1) + '</div>' +
+        '<div class="prevbody"><div class="prevq">' + esc(c.q) + '</div>' +
+        '<div class="preva">' + esc(a || '(无答案)') + '</div></div></div>';
+    }).join('');
+    viewEl.innerHTML =
+      '<div class="card"><div class="lbl">《' + esc(book) + '》预览（共 ' + cards.length + ' 张）</div>' +
+      '<p class="hint">先翻一遍，想好从哪张开始背。</p>' +
+      '<div class="rstart"><span class="rolbl">从哪开始</span>' +
+      '<span>从第</span><input id="lib-preview-start-in" class="num" type="number" min="1" value="1">' +
+      '<span>张开始（共 ' + cards.length + ' 张）</span></div>' +
+      '<button class="btn primary" data-act="lib-preview-start">开始复习这本书</button>' +
+      '<button class="btn" data-act="lib-preview-back">← 返回书架</button>' +
+      '</div>' +
+      '<div class="card prevlist">' + list + '</div>';
   }
 
   // 编辑单张卡片（弹层）
@@ -1209,7 +1287,8 @@
       '<button class="btn primary" data-act="cd-add">添加倒计时</button>' +
       '</div>' +
       '<div class="card"><div class="lbl">复习分布（按下次复习时间）</div>' + dist + '</div>' +
-      '<div class="card"><div class="lbl">个人记忆曲线（最近 14 天，按你自己的真实答对率绘制，不套用通用模型）</div>' + curve + '</div>' +
+      '<div class="card"><div class="lbl">个人记忆曲线（最近 ' + (usedDays() ? Math.min(180, Math.max(14, usedDays())) : 14) + ' 天，按你真实答对率画，用得越久越稳）</div>' + curve +
+      '<p class="hint">已坚持复习 ' + usedDays() + ' 天 · 整体记忆率 ' + Math.round(globalRetention().retention * 100) + '% · 平均稳定度 ' + avgStability() + ' 天</p></div>' +
       '<div class="card"><div class="lbl">主题（点一下立刻换，选择会记住）</div><div class="themes">' + th + '</div></div>' +
       '<div class="card">' +
       '<button class="btn" data-act="export">导出备份(JSON)</button>' +
@@ -1273,7 +1352,9 @@
   function buildCurveSVG() {
     var W = 320, H = 160, padL = 26, padB = 22, padT = 12, padR = 8;
     var plotW = W - padL - padR, plotH = H - padT - padB;
-    var days = 14;
+    // 不限制 14 天：按你真实使用的天数画（最少 14 天，最多 180 天），用得越久曲线越稳
+    var used = usedDays();
+    var days = used ? Math.min(180, Math.max(14, used)) : 14;
     var data = dailyRetention(days); // [{day, rate(0~100|null), t}]
     var hasData = data.some(function (d) { return d.rate != null; });
     var grid = '';
@@ -1358,7 +1439,7 @@
     if (act === 'goal-unlim') {
       state.dailyGoal = state.dailyGoal || { review: 0, exam: 0 };
       state.dailyGoal.review = 0; reviewQueue = null; reviewSource = state.cards.slice();
-      applyReviewOrder(); render(); return;
+      reviewSetupPending = false; applyReviewOrder(); render(); return;
     }
     // 备考倒计时：预设快捷填入 / 添加 / 删除
     if (act === 'cd-preset') {
@@ -1490,7 +1571,7 @@
       render(); return;
     }
 
-    if (act === 'review-all') { reviewQueue = null; reviewSource = state.cards.slice(); applyReviewOrder(); render(); return; }
+    if (act === 'review-all') { reviewQueue = null; reviewSource = state.cards.slice(); reviewSetupPending = false; applyReviewOrder(); render(); return; }
     if (act === 'rev-start') {
       var total = reviewSource ? reviewSource.length : state.cards.length;
       var n = parseInt(val('rev-start-in'), 10);
@@ -1505,12 +1586,45 @@
     if (act === 'review-book') {
       var rb = state.cards.filter(function (c) { return c.book === arg; });
       if (!rb.length) { toast('这本书还没有卡片'); return; }
-      reviewQueue = null; reviewSource = rb; applyReviewOrder(); show('review'); return;
+      previewBook = arg; render(); return;   // 进书库预览：先看再决定从哪张开始
     }
     if (act === 'del-book') {
       if (!confirm('删除《' + arg + '》及其所有卡片？此操作不可恢复')) return;
       state.cards = state.cards.filter(function (c) { return c.book !== arg; });
       save(); toast('已删除《' + arg + '》'); render(); return;
+    }
+    // 书库预览：返回书架 / 从指定位置开始复习这本书
+    if (act === 'lib-preview-back') { previewBook = ''; render(); return; }
+    if (act === 'lib-preview-start') {
+      var pbook = previewBook;
+      var pcards = state.cards.filter(function (c) { return c.book === pbook; });
+      if (!pcards.length) { previewBook = ''; render(); return; }
+      var pn = parseInt(val('lib-preview-start-in'), 10) || 1;
+      if (pn < 1) pn = 1; if (pn > pcards.length) pn = pcards.length;
+      state.reviewStart = pn;
+      reviewSource = pcards.slice();
+      reviewQueue = null; reviewSetupPending = false;
+      applyReviewOrder();
+      previewBook = '';
+      show('review'); return;
+    }
+    // 今日复习计划：勾选书 / 取消 / 开始（聚合全部到期，按选中的书）
+    if (act === 'plan-book') { reviewBookSel[arg] = !reviewBookSel[arg]; render(); return; }
+    if (act === 'plan-cancel') { reviewSetupPending = false; reviewQueue = null; render(); return; }
+    if (act === 'plan-start' || act === 'plan-review-all') {
+      var wantAll = (act === 'plan-review-all');
+      var selBooks = Object.keys(reviewBookSel).filter(function (b) { return reviewBookSel[b]; });
+      var src = wantAll
+        ? state.cards.filter(function (c) { return selBooks.indexOf(c.book || '未分类') >= 0; })
+        : dueCards().filter(function (c) { return selBooks.indexOf(c.book || '未分类') >= 0; });
+      if (!src.length) { toast('没有可复习的卡片，换个勾选试试'); return; }
+      var sn = parseInt(val('plan-start-in'), 10) || 1;
+      if (sn < 1) sn = 1; if (sn > src.length) sn = src.length;
+      state.reviewStart = sn;
+      reviewSource = src.slice();
+      reviewQueue = null; reviewSetupPending = false;
+      applyReviewOrder();
+      show('review'); return;
     }
 
     if (act === 'exam-start') {

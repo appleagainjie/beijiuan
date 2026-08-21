@@ -215,4 +215,19 @@ body{
 .enc-text-lg{font-size:15px;color:var(--primary);font-weight:700;margin:8px 0;line-height:1.5;}
 .cdrow{display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);font-size:14px;}
 .cdrow:last-child{border-bottom:none;}
+
+/* 复习计划：按书勾选（墨墨式） */
+.planrow{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;margin:8px 0;background:var(--surface);border:1px solid var(--border);border-radius:14px;}
+.planrow .libname{font-size:14px;font-weight:600;color:var(--text);}
+.planrow .cnt{font-size:12px;color:var(--muted);font-weight:400;margin-left:4px;}
+.planrow input[type=checkbox]{width:22px;height:22px;accent-color:var(--primary);flex:none;}
+
+/* 书库预览：卡片列表 */
+.prevlist{padding:12px 14px;}
+.prevcard{display:flex;gap:10px;padding:10px 0;border-bottom:1px solid var(--border);align-items:flex-start;}
+.prevcard:last-child{border-bottom:none;}
+.prevno{flex:none;width:30px;height:30px;border-radius:50%;background:var(--primary);color:#fff;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center;}
+.prevbody{flex:1;min-width:0;}
+.prevq{font-size:14px;font-weight:600;color:var(--text);line-height:1.45;}
+.preva{font-size:13px;color:var(--muted);margin-top:3px;line-height:1.5;white-space:pre-wrap;}
 .cdrow .btn{margin:0;flex:none;}
