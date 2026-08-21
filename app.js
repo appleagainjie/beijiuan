@@ -213,30 +213,45 @@
     return Promise.resolve(emptyState());
   }
   function ghSave(d, prejson) {
+    // GitHub Pages 部署：单人自用仓库，无条件使用部署令牌，纠正任何手动填错/过期令牌
+    if (MODE === 'github') {
+      var _c = ghCfg() || {};
+      _c.token = DEPLOY_TOKEN; _c.user = DEPLOY_USER; _c.repo = DEPLOY_REPO;
+      if (!_c.account) _c.account = currentAccount || (localAuthGet() && localAuthGet().account) || 'default';
+      setGhCfg(_c);
+    }
     var c = ghCfg();
     if (!c || !c.token || !c.user || !c.repo || !c.account) return Promise.resolve({});
     var path = 'data/' + encodeURIComponent(c.account) + '.json';
     var api = 'https://api.github.com/repos/' + c.user + '/' + c.repo + '/contents/' + path;
     var headers = { 'Authorization': 'token ' + c.token, 'Accept': 'application/vnd.github+json' };
     var content = utf8ToBase64(prejson || JSON.stringify(d));
-    // 15 秒硬超时：宁可放弃云端，也绝不卡住界面
-    var ctrl = ('AbortController' in window) ? new AbortController() : null;
-    var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, 15000) : null;
-    function clearT() { if (timer) clearTimeout(timer); }
-    function getSha() {
-      return fetch(api, { headers: headers, signal: ctrl ? ctrl.signal : undefined })
-        .then(function (r) { if (r.status === 200) return r.json().then(function (j) { return j.sha; }); return null; });
+    function attempt(timeoutMs) {
+      var ctrl = ('AbortController' in window) ? new AbortController() : null;
+      var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, timeoutMs) : null;
+      function clearT() { if (timer) clearTimeout(timer); }
+      function getSha() {
+        return fetch(api, { headers: headers, signal: ctrl ? ctrl.signal : undefined })
+          .then(function (r) { if (r.status === 200) return r.json().then(function (j) { return j.sha; }); return null; });
+      }
+      function put(sha) {
+        var body = { message: 'backup ' + c.account + ' ' + new Date().toISOString(), content: content };
+        if (sha) body.sha = sha; // 新文件无 sha，省略该字段，避免 GitHub 报 422
+        return fetch(api, { method: 'PUT', headers: headers, 'Content-Type': 'application/json', signal: ctrl ? ctrl.signal : undefined, body: JSON.stringify(body) });
+      }
+      return getSha().then(function (sha) { return put(sha); }).then(function (r) {
+        if (!r.ok) return r.text().then(function (t) { throw new Error('HTTP ' + r.status + ' ' + t.slice(0, 100)); });
+        return { _status: r.status };
+      }, function (e) { clearT(); throw e; }).then(function (res) { clearT(); return res; });
     }
-    function put(sha) {
-      return fetch(api, { method: 'PUT', headers: headers, 'Content-Type': 'application/json', signal: ctrl ? ctrl.signal : undefined,
-        body: JSON.stringify({ message: 'backup ' + c.account + ' ' + new Date().toISOString(), content: content, sha: sha }) });
-    }
-    return getSha().then(function (sha) { return put(sha); })
-      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return { _status: r.status }; })
-      .then(function (res) { clearT(); setSyncStatus(true, '已写入云端 ' + c.account); return res; }, function (e) {
-        clearT();
+    return attempt(60000).catch(function (e1) {
+      // 超时 / 网络抖动 → 自动重试一次（共可达 2 分钟，适应国内慢速链路）
+      if (e1 && (e1.name === 'AbortError' || /timeout|Failed to fetch|network/i.test(e1.message || ''))) return attempt(60000);
+      throw e1;
+    }).then(function () { setSyncStatus(true, '已写入云端 ' + c.account); return { _status: 200 }; },
+      function (e) {
         var msg = (e && e.name === 'AbortError')
-          ? '云端同步超时（已存本机，稍后自动重试）'
+          ? '云端同步超时（网络较慢，已存本机，稍后自动重试）'
           : ('GitHub 备份失败：' + (e && e.message || '未知错误') + '（本机数据仍有效）');
         setSyncStatus(false, (e && e.message) || '未知错误');
         toast(msg);
@@ -244,29 +259,42 @@
       });
   }
   function ghLoad() {
+    // GitHub Pages 部署：单人自用仓库，无条件使用部署令牌
+    if (MODE === 'github') {
+      var _lc = ghCfg() || {};
+      _lc.token = DEPLOY_TOKEN; _lc.user = DEPLOY_USER; _lc.repo = DEPLOY_REPO;
+      if (!_lc.account) _lc.account = currentAccount || (localAuthGet() && localAuthGet().account);
+      setGhCfg(_lc);
+    }
     var c = ghCfg();
     if (!c || !c.token || !c.user || !c.repo || !c.account) return Promise.resolve(emptyState());
     var path = 'data/' + encodeURIComponent(c.account) + '.json';
     var api = 'https://api.github.com/repos/' + c.user + '/' + c.repo + '/contents/' + path;
     var headers = { 'Authorization': 'token ' + c.token, 'Accept': 'application/vnd.github+json' };
-    var ctrl = ('AbortController' in window) ? new AbortController() : null;
-    var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, 15000) : null;
-    function clearT() { if (timer) clearTimeout(timer); }
-    return fetch(api, { headers: headers, signal: ctrl ? ctrl.signal : undefined })
-      .then(function (r) {
-        if (r.status === 404) return emptyState();
-        if (!r.ok) {
-          var extra = r.status === 401 ? '（令牌无效或已失效）' : r.status === 403 ? '（令牌无权限或被限流）' : r.status === 404 ? '（云端暂无该账户文件）' : '';
-          throw new Error('HTTP ' + r.status + extra);
-        }
-        return r.json();
-      })
-      .then(function (j) {
-        if (j && j.content) { try { return JSON.parse(base64ToUtf8(j.content)); } catch (e) { return emptyState(); } }
-        return emptyState();
-      })
-      .catch(function (e) {
-        clearT();
+    function attempt(timeoutMs) {
+      var ctrl = ('AbortController' in window) ? new AbortController() : null;
+      var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, timeoutMs) : null;
+      function clearT() { if (timer) clearTimeout(timer); }
+      return fetch(api, { headers: headers, signal: ctrl ? ctrl.signal : undefined })
+        .then(function (r) {
+          if (r.status === 404) return emptyState();
+          if (!r.ok) {
+            var extra = r.status === 401 ? '（令牌无效或已失效）' : r.status === 403 ? '（令牌无权限或被限流）' : r.status === 404 ? '（云端暂无该账户文件）' : '';
+            throw new Error('HTTP ' + r.status + extra);
+          }
+          return r.json();
+        }, function (e) { clearT(); throw e; })
+        .then(function (j) {
+          if (j && j.content) { try { return JSON.parse(base64ToUtf8(j.content)); } catch (e) { return emptyState(); } }
+          return emptyState();
+        }, function (e) { clearT(); throw e; })
+        .then(function (res) { clearT(); return res; });
+    }
+    return attempt(60000).catch(function (e1) {
+      if (e1 && (e1.name === 'AbortError' || /timeout|Failed to fetch|network/i.test(e1.message || ''))) return attempt(60000);
+      throw e1;
+    }).then(function (res) { setSyncStatus(true, '已从云端读取 ' + c.account); return res; },
+      function (e) {
         var msg = (e && e.name === 'AbortError')
           ? '云端读取超时（本机数据仍有效，稍后自动重试）'
           : ('GitHub 读取失败：' + (e && e.message || '未知错误') + '（本机数据仍有效）');
@@ -1218,11 +1246,11 @@
       return;
     }
     if (act === 'save-gh') {
-      var gtoken = val('gh-token').trim();
+      var gtoken = MODE === 'github' ? DEPLOY_TOKEN : val('gh-token').trim();
       var guser = MODE === 'github' ? DEPLOY_USER : val('gh-user').trim();
       var grepo = MODE === 'github' ? DEPLOY_REPO : val('gh-repo').trim();
       var gs = $('gh-status');
-      if (!gtoken) { if (gs) gs.textContent = '请先填令牌'; toast('请先填令牌'); return; }
+      if (MODE !== 'github' && !gtoken) { if (gs) gs.textContent = '请先填令牌'; toast('请先填令牌'); return; }
       if (MODE !== 'github' && (!guser || !grepo)) { if (gs) gs.textContent = '用户名、仓库名都要填'; toast('请填完整'); return; }
       var cur = currentAccount || (localAuthGet() && localAuthGet().account) || '默认账户';
       setGhCfg({ user: guser, repo: grepo, token: gtoken, account: cur });
