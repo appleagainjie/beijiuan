@@ -383,7 +383,7 @@
   // 部署令牌（自用仓库专用）：以拼接方式存放，避免被公开仓库的密钥扫描拦截；如需更换请在 GitHub 重新生成 PAT 后替换下面两段
   var DEPLOY_TOKEN = 'ghp_' + 'xPeIY2W6Ku9sG1Iz24CWcWE0bWvRs03YuoZF';
   var SYNC_KEY = 'beiji_sync_v1';
-  var APP_VERSION = '2026.08.22h';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
+  var APP_VERSION = '2026.08.22i';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
   var cloudSha = null;        // 云端当前文件 sha（轮询判断是否变更）
   var cloudCardCount = 0;     // 云端当前卡片数（用于防“空覆盖”）
   var syncTimer = null;       // 实时同步轮询定时器
@@ -2052,88 +2052,118 @@
     return pts;
   }
   // 揭示答案时，把“大点/小点”标题行加粗，显著标明层级
-  function renderClozeAnswer(a) {
-    return (a || '').split('\n').map(function (line) {
-      var e = esc(line);
-      if (/^[（(][一二三四五六七八九十\d]+[)）]/.test(line) || /^\d+[\.．、]/.test(line)) {
-        return '<div class="bp">' + e + '</div>';
-      }
-      return '<div>' + e + '</div>';
-    }).join('');
-  }
+    function renderClozeAnswer(a) {
+      var firstDone = false;
+      return (a || '').split('\n').map(function (line) {
+        var e = esc(line);
+        if (!line.trim()) return '<div>' + e + '</div>';
+        var bold = (!firstDone)
+          || /^[（(]?\d+[）).．、]/.test(line)
+          || /^[（(][一二三四五六七八九十]+[)）]/.test(line)
+          || /^[一二三四五六七八九十]+[、．.]/.test(line);
+        if (bold) firstDone = true;
+        return '<div class="' + (bold ? 'bp' : '') + '">' + e + '</div>';
+      }).join('');
+    }
     function makeCloze(qText, aText) {
     var pts = extractSmallPoints(aText);
     return { q: qText, a: aText, cloze: true, points: pts };
   }
   // 把一段正文按“同行的多个 ①②③ 或 （1）（2）”拆成多个子点文本：细分但保留全部内容
-  function splitBodyIntoSubpoints(body) {
-    if (!body || !body.trim()) return [];
-    var re = /[①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳][^①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳]*/g;
-    var ms = body.match(re);
-    if (ms && ms.length >= 2) return ms;
-    var re2 = /（\d+）[^（]*/g;
-    var ms2 = body.match(re2);
-    if (ms2 && ms2.length >= 2) return ms2;
-    return [body];
+  // 把一段“子点正文”按命名子概念（（1）/ 1）等）拆成若干子卡；
+  // ① 圆点序号一律视为内容细节，不拆卡。返回 null 表示无需拆分。
+  function splitBodyIntoSubconcepts(body) {
+    if (!body || body.trim().length < 6) return null;
+    var re = /[（(]?\d+[）)]/g, ms = [], m;
+    while ((m = re.exec(body)) !== null) ms.push({ idx: m.index, end: m.index + m[0].length, full: m[0] });
+    if (ms.length < 2) return null;
+    var segs = [];
+    for (var k = 0; k < ms.length; k++) {
+      var start = ms[k].end;
+      var end = (k + 1 < ms.length) ? ms[k + 1].idx : body.length;
+      var seg = stripBullet(body.slice(start, end)).replace(/^[\s：:、，,]+/, '').trim();
+      if (seg) segs.push({ marker: ms[k].full, text: seg });
+    }
+    if (segs.length < 2) return null;
+    return segs;
+  }
+  // 去掉标题末尾的考试标注括号，如 （18名解；26简答）/（概念、原则）
+  function stripExamNote(t) {
+    return t.replace(/[（(][^（）]*\d[^（）]*(名解|简答|论述|名辨|复论|复简|复试|辨析)[^（）]*[）)]$/, '')
+         .replace(/[（(][^（）]*\d{2,}[^（）]*[）)]$/, '')
+         .replace(/[（(][^（）\d]{1,18}[）)]$/, '')
+         .trim();
+  }
+  // 子点标题去“N.”与“（补充）”前缀，便于清爽显示
+  function cleanSubTitle(t) {
+    return stripExamNote(t.replace(/^\d+[\.．、]\s*/, '').replace(/^（补充）\s*/, ''));
+  }
+  // 从命名子概念文本里取概念名（换行 / 冒号 / 首个圆点序号 ① 处断词；并去行首 （n） 前缀）
+  function conceptName(text) {
+    var nl = text.indexOf('\n');
+    var c = text.indexOf('：'); if (c < 0) c = text.indexOf(':');
+    var circ = text.search(/[①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳]/);
+    var cand = [];
+    if (nl > 0) cand.push(nl);
+    if (c > 0) cand.push(c);
+    if (circ > 0) cand.push(circ);
+    var cut = cand.length ? Math.min.apply(null, cand) : Math.min(14, text.length);
+    var name = text.slice(0, cut).replace(/^[（(]\d+[)）]\s*/, '');
+    return stripExamNote(name).replace(/[：:、，,\s]+$/, '');
   }
   function parseCloze(text) {
-    // 去段首项目符号、按换行切段、去空行；正文里 ①②③、（一）、数字序号全部保留，不删任何内容
     var paras = (text || '').replace(/\r/g, '').split(String.fromCharCode(10))
       .map(function (s) { return stripBullet(s).trim(); }).filter(Boolean);
-    function levelOf(p) {
-      if (/^第[一二三四五六七八九十]+篇[、．.]/.test(p)) return 0;       // 篇
-      if (/^[一二三四五六七八九十]+[、．.]/.test(p)) return 1;            // 章 一、二、
-      if (/^（[一二三四五六七八九十]+）/.test(p)) return 2;              // 大点 （一）
-      if (/^\d+[\.．、]/.test(p)) return 3;                             // 编号点 1. 2.
-      if (/^（\d+）/.test(p)) return 4;                                  // 子点 (1)
-      return -1;                                                        // 说明段（含以 ① 开头的行：同行挤着的 ①②③ 一律归入父节点 body，由 splitBodyIntoSubpoints 细分）
-    }
-    // 建层级树：说明段挂在栈顶节点；序号行按层级入栈/出栈
-    var root = { level: -2, title: '', body: [], children: [] };
+    function isChapter(p) { return /^[一二三四五六七八九十]+[、．.]/.test(p) || /^第[一二三四五六七八九十]+篇[、．.]/.test(p); }
+    function isBig(p) { return /^（[一二三四五六七八九十]+）/.test(p); }
+    function isSub(p) { return /^\d+[\.．、]/.test(p) || /^（补充）/.test(p); }
+    // 建树：篇/章/大点(lv<=1) 为容器，子点(lv2) 成卡，说明段挂栈顶
+    var root = { lv: -2, title: '', body: [], children: [] };
     var stack = [root];
     for (var i = 0; i < paras.length; i++) {
-      var p = paras[i], lv = levelOf(p);
-      if (lv === -1) {
-        stack[stack.length - 1].body.push(p);
-      } else {
-        while (stack.length > 1 && stack[stack.length - 1].level >= lv) stack.pop();
-        var node = { level: lv, title: p, body: [], children: [] };
+      var p = paras[i], lv;
+      if (isChapter(p)) lv = 0;
+      else if (isBig(p)) lv = 1;
+      else if (isSub(p)) lv = 2;
+      else lv = -1;
+      if (lv === -1) { stack[stack.length - 1].body.push(p); }
+      else {
+        while (stack.length > 1 && stack[stack.length - 1].lv >= lv) stack.pop();
+        var node = { lv: lv, title: p, body: [], children: [] };
         stack[stack.length - 1].children.push(node);
         stack.push(node);
       }
     }
     var items = [];
-    function joinPrefix(arr) { return arr.join(' › '); }
-    function walk(node, prefixTitles) {
-      var childPrefix = prefixTitles.concat(node.title ? [node.title] : []);
-      if (node.children.length === 0) {
-        // 叶子：成卡。若 body 含多个 ①②③/(1) 则再细分
-        var bodyText = node.body.join('\n');
-        var subs = splitBodyIntoSubpoints(bodyText);
-        var head = (prefixTitles.length ? prefixTitles.join('\n') + '\n' : '') + (node.title ? node.title + '\n' : '');
-        if (subs.length <= 1) {
-          items.push(makeCloze(joinPrefix(childPrefix), head + bodyText));
-        } else {
-          subs.forEach(function (sc) {
-            var sm = sc.match(/^[①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳]/);
-            var label = sm ? sm[0] : '';
-            var first = sc.replace(/^[①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳]\s*/, '').slice(0, 22);
-            items.push(makeCloze(joinPrefix(childPrefix) + ' › ' + label + first, head + sc));
-          });
-        }
-      } else {
-        // 容器：自身说明段下传到第一个子节点（保证不删）；标题作为层级前缀下传
-        if (node.body.length && node.children.length) {
-          node.children[0].body = node.body.concat(node.children[0].body);
-        }
-        node.children.forEach(function (c) { walk(c, childPrefix); });
+    function flushSub(node, prefix) {
+      var body = node.body.join('\n');
+      var title = cleanSubTitle(node.title);
+      var titlePrefix = (prefix.length ? prefix.join(' › ') + ' › ' : '') + title;
+      var subs = splitBodyIntoSubconcepts(body);
+      if (!subs) {
+        items.push(makeCloze(titlePrefix, (title ? title + '\n' : '') + body));
+        return;
       }
+      // 概述卡：首个子概念标记之前的引言 + 子概念清单
+      var firstIdx = body.indexOf(subs[0].marker);
+      var intro = firstIdx > 0 ? body.slice(0, firstIdx).replace(/[\s：:、，,]+$/, '') : '';
+      var names = subs.map(function (s) { return conceptName(s.text); });
+      var overviewA = (intro ? intro + '\n' : '') + '主要包括：' + names.join('、') + '。';
+      items.push(makeCloze(titlePrefix, overviewA));
+      subs.forEach(function (s) {
+        var nm = conceptName(s.text);
+        items.push(makeCloze(titlePrefix + ' › ' + nm, s.marker + s.text));
+      });
+    }
+    function walk(node, prefix) {
+      var cleanTitle = node.title ? stripExamNote(node.title) : '';
+      var newPrefix = prefix.concat(cleanTitle ? [cleanTitle] : []);
+      if (node.lv === 2) { flushSub(node, prefix); return; }
+      if (node.body.length && node.children.length) node.children[0].body = node.body.concat(node.children[0].body);
+      node.children.forEach(function (c) { walk(c, newPrefix); });
     }
     root.children.forEach(function (c) { walk(c, []); });
-    // 文件开头的前言（如书名、协作提示）保留为第一张卡
-    if (root.body.length) {
-      items.unshift(makeCloze(root.body[0], root.body.join('\n')));
-    }
+    if (root.body.length) items.unshift(makeCloze(root.body[0], root.body.join('\n')));
     return items;
   }
 function detectMode(text) {
