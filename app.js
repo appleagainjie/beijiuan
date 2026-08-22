@@ -372,7 +372,7 @@
   // 部署令牌（自用仓库专用）：以拼接方式存放，避免被公开仓库的密钥扫描拦截；如需更换请在 GitHub 重新生成 PAT 后替换下面两段
   var DEPLOY_TOKEN = 'ghp_' + 'xPeIY2W6Ku9sG1Iz24CWcWE0bWvRs03YuoZF';
   var SYNC_KEY = 'beiji_sync_v1';
-  var APP_VERSION = '2026.08.22d';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
+  var APP_VERSION = '2026.08.22e';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
   var cloudSha = null;        // 云端当前文件 sha（轮询判断是否变更）
   var cloudCardCount = 0;     // 云端当前卡片数（用于防“空覆盖”）
   var syncTimer = null;       // 实时同步轮询定时器
@@ -661,6 +661,36 @@
       return '<div class="cd-chip"><span class="cd-name">' + esc(cd.name) + '</span><span class="cd-days">' + txt + '</span></div>';
     }).join('');
     return '<div class="cdbar">' + chips + '</div>';
+  }
+  // 备考进度：取最近的目标日，算出“每天至少背多少张”，用于在使用页顶部提醒
+  function planInfo() {
+    var cds = (state.countdowns || []).slice().sort(function (a, b) { return new Date(a.date + 'T00:00:00').getTime() - new Date(b.date + 'T00:00:00').getTime(); });
+    if (!cds.length) return null;
+    var now = Date.now();
+    var target = null;
+    for (var i = 0; i < cds.length; i++) { var ts = new Date(cds[i].date + 'T00:00:00').getTime(); if (ts >= now) { target = cds[i]; break; } }
+    if (!target) target = cds[cds.length - 1];
+    var ts2 = new Date(target.date + 'T00:00:00').getTime();
+    var days = Math.ceil((ts2 - now) / DAY);
+    var total = state.cards.length;
+    var perDay = days > 0 ? Math.ceil(total / days) : total;
+    var done = todayReviewedCount();
+    return { name: target.name, date: target.date, days: days, total: total, perDay: perDay, done: done };
+  }
+  function planBannerHtml() {
+    var p = planInfo();
+    if (!p) return '';
+    var head, body;
+    if (p.days <= 0) { head = '🎯 ' + esc(p.name) + ' 就是今天！倾尽全力去赢！'; body = '全部 ' + p.total + ' 张都要过一遍，今天已背 ' + p.done + ' 张。'; }
+    else if (p.days <= 7) { head = '🔥 ' + esc(p.name) + ' 只剩 ' + p.days + ' 天！冲！'; body = '每天至少背 ' + p.perDay + ' 张，今天已背 ' + p.done + ' 张，别停！'; }
+    else if (p.days <= 30) { head = '⏰ ' + esc(p.name) + ' 还有 ' + p.days + ' 天'; body = '想考前过完一轮，每天至少背 ' + p.perDay + ' 张（今天已背 ' + p.done + ' 张）。'; }
+    else { head = '📌 ' + esc(p.name) + ' 还有 ' + p.days + ' 天'; body = '按节奏走，每天至少背 ' + p.perDay + ' 张就能考前过完一遍。'; }
+    return '<div class="planbar"><span class="plan-head">' + head + '</span><span class="plan-body">' + body + '</span></div>';
+  }
+  function planPreviewText() {
+    var p = planInfo();
+    if (!p) return '<span class="hint">还没设目标日，先到上方「备考倒计时」添加「考研 / 开学」。</span>';
+    return '目标【' + esc(p.name) + '】' + esc(p.date) + ' · 还有 <b>' + p.days + '</b> 天 · 共 <b>' + p.total + '</b> 张 · 建议每天至少背 <b>' + p.perDay + '</b> 张（今天已背 ' + p.done + ' 张）';
   }
   var FINISH_REVIEW = ['今日目标达成，你真的在为上岸蓄力！', '今天这一遍，记住的就是自己的。', '任务清零，心里踏实，明天继续。', '坚持的样子，就是上岸的样子。'];
   function finishEncouragement() { return FINISH_REVIEW[Math.floor(Math.random() * FINISH_REVIEW.length)]; }
@@ -1013,7 +1043,7 @@
     var progressTxt = goal > 0 ? '今日进度 ' + done + ' / ' + goal + ' 🌱' : '今日已背 ' + done + ' 张 🌱';
     // 当日目标已达成：弹出庆祝 + 鼓励，不再抽新卡（想继续可点“不限量”）
     if (goal > 0 && done >= goal) {
-      viewEl.innerHTML = countdownBarHtml() +
+      viewEl.innerHTML = countdownBarHtml() + planBannerHtml() +
         '<div class="card center"><div class="big">🏆</div>' +
         '<p>今日目标已完成！</p>' +
         '<p class="enc-text-lg">' + finishEncouragement() + '</p>' +
@@ -1023,7 +1053,7 @@
     }
     if (!reviewQueue || reviewQueue.length === 0) {
       var celebrate = (goal > 0 && done >= goal);
-      viewEl.innerHTML = countdownBarHtml() +
+      viewEl.innerHTML = countdownBarHtml() + planBannerHtml() +
         '<div class="card center"><div class="big">' + (celebrate ? '🏆' : '🎉') + '</div>' +
         '<p>' + (celebrate ? '今日目标已完成！' : '当前没有待复习的卡片。') + '</p>' +
         (celebrate ? '<p class="enc-text-lg">' + finishEncouragement() + '</p>' : '') +
@@ -1040,7 +1070,7 @@
       nextHint = '<p class="hint">' + lastTxt + ' · 熟悉度 ' + familiarity(card) + '%</p>';
     }
     viewEl.innerHTML =
-      countdownBarHtml() +
+      countdownBarHtml() + planBannerHtml() +
       '<div class="goalbar"><span class="goaltxt">' + progressTxt + '</span>' +
       goalControlHtml(goal, 'rev-goal') + '</div>' +
       '<div class="encour">' + randomEncouragement('review') + '</div>' +
@@ -1073,7 +1103,7 @@
     due.forEach(function (c) { var b = c.book || '未分类'; byBook[b] = (byBook[b] || 0) + 1; });
     var books = Object.keys(byBook).sort();
     if (!books.length) {
-      viewEl.innerHTML = countdownBarHtml() +
+      viewEl.innerHTML = countdownBarHtml() + planBannerHtml() +
         '<div class="card center"><div class="big">🌿</div>' +
         '<p>今天暂时没有「到期」的卡片。</p>' +
         '<p class="hint">想巩固就把全部卡片混在一起过一遍：</p>' +
@@ -1089,7 +1119,7 @@
       return '<label class="planrow"><span class="libname">' + esc(b) + ' <span class="cnt">' + byBook[b] + ' 张到期</span></span>' +
         '<input type="checkbox" data-act="plan-book" data-arg="' + esc(b) + '"' + (reviewBookSel[b] ? ' checked' : '') + '></label>';
     }).join('');
-    viewEl.innerHTML = countdownBarHtml() +
+    viewEl.innerHTML = countdownBarHtml() + planBannerHtml() +
       '<div class="card"><div class="lbl">今日复习计划</div>' +
       '<p class="hint">今天共 <b>' + due.length + '</b> 张到期，分布在 <b>' + books.length + '</b> 本书里。' +
       '勾选你今天想背的书，再选从第几张开始（像墨墨背单词一样自己安排）。</p>' +
@@ -1108,7 +1138,7 @@
       var goal = (state.dailyGoal && state.dailyGoal.exam) || 0;
       var done = todayExamCount();
       var progressTxt = goal > 0 ? '今日已测 ' + done + ' / ' + goal + ' 📝' : '今日已测 ' + done + ' 题 📝';
-      viewEl.innerHTML = countdownBarHtml() +
+      viewEl.innerHTML = countdownBarHtml() + planBannerHtml() +
         '<div class="encour">' + randomEncouragement('exam') + '</div>' +
         '<div class="goalbar"><span class="goaltxt">' + progressTxt + '</span>' +
         goalControlHtml(goal, 'exam-goal') + '</div>' +
@@ -1120,7 +1150,7 @@
     if (exam.idx >= exam.queue.length) {
       var total = exam.queue.length;
       var score = total ? Math.round(exam.score / total * 100) : 0;
-      viewEl.innerHTML = countdownBarHtml() +
+      viewEl.innerHTML = countdownBarHtml() + planBannerHtml() +
         '<div class="card center"><div class="big">' + score + ' 分</div>' +
         '<p>答对 ' + exam.score + ' / ' + total + '</p>' +
         '<p class="enc-text-lg">' + examResultText(exam.score, total) + '</p>' +
@@ -1337,44 +1367,12 @@
       '<button class="btn bad" data-act="wipe-local">清除本机数据</button>' +
       '</div>' +
       '<div class="card">' +
-      '<div class="lbl">AI 解析配置（可选）</div>' +
-      '<p class="hint">填入 OpenAI 兼容接口后，文件导入可调用 AI 自动拆题。不填则走本地智能解析。</p>' +
-      '<label class="lbl">接口地址</label>' +
-      '<input id="ai-url" class="inp" placeholder="https://api.openai.com/v1/chat/completions" value="' + esc(state.ai.url) + '">' +
-      '<label class="lbl">API Key</label>' +
-      '<input id="ai-key" type="password" class="inp" placeholder="sk-..." value="' + esc(state.ai.key) + '">' +
-      '<label class="lbl">模型</label>' +
-      '<input id="ai-model" class="inp" placeholder="gpt-4o-mini" value="' + esc(state.ai.model) + '">' +
-      '<button class="btn primary" data-act="save-ai">保存 AI 配置</button>' +
-      '</div>' +
-      '<div class="card">' +
-      '<div class="lbl">云端同步' + (MODE === 'github' ? '（已自动开启 · 无需任何配置）' : '（GitHub 双保险）') + '</div>' +
-      (MODE === 'github'
-        ? '<p class="hint">✅ 云端同步已<b>自动开启</b>：内置令牌 + 仓库 <b>' + DEPLOY_USER + '/' + DEPLOY_REPO + '</b>，<b>每次保存都会自动双写「本机 + 云端」</b>。换手机或清缓存后，<b>用同一个账号（手机号）登录，就会自动拉取全部卡片</b>——不用填令牌、不用任何设置。</p>'
-        : '<p class="hint">填入 GitHub 令牌（需 repo 权限）后，数据自动备份到你的仓库。令牌只存本机，不写代码。</p>') +
-      (MODE === 'github'
-        ? ''
-        : '<label class="lbl">GitHub 用户名</label>' +
-          '<input id="gh-user" class="inp" placeholder="如 appleagainjie" value="' + esc(gc.user || DEPLOY_USER) + '">' +
-          '<label class="lbl">数据仓库名</label>' +
-          '<input id="gh-repo" class="inp" placeholder="beijiuan" value="' + esc(gc.repo || DEPLOY_REPO) + '">') +
-      (MODE === 'github'
-        ? ''
-        : '<label class="lbl">个人访问令牌 PAT（需 repo 权限，仅填一次）</label>' +
-          '<input id="gh-token" type="password" class="inp" placeholder="ghp_... 或 github_pat_..." value="' + (gc.token ? '（已保存）' : '') + '">') +
-      (MODE === 'github'
-        ? ''
-        : '<button class="btn" data-act="fill-deploy-token">一键填入部署令牌</button>') +
-      '<p class="hint">数据按登录账号分文件存储（当前账号：<b>' + esc(currentAccount || (localAuthGet() && localAuthGet().account) || '未登录') + '</b>）。<b>务必在所有设备上用同一个手机号登录</b>，才能互相同步。</p>' +
+      '<div class="lbl">数据备份与同步</div>' +
+      '<p class="hint">✅ 云端自动备份已开启：每次保存、导入都自动同步。换手机用<b>同一个手机号</b>登录即可同步全部卡片，无需任何设置。</p>' +
       '<div class="ghbtns">' +
-        (MODE === 'github'
-          ? '<button class="btn" data-act="backup-gh">立即备份到云端</button>' +
-            '<button class="btn primary" data-act="sync-now">立即同步（跨设备拉取）</button>'
-          : '<button class="btn primary" data-act="save-gh">保存并开启云端</button>' +
-            '<button class="btn" data-act="backup-gh">立即备份</button>' +
-            '<button class="btn" data-act="sync-now">立即同步（跨设备）</button>') +
+      '<button class="btn" data-act="backup-gh">立即备份到云端</button>' +
+      '<button class="btn primary" data-act="sync-now">立即同步（跨设备拉取）</button>' +
       '</div>' +
-      '<p class="hint" id="gh-status"></p>' +
       '<p class="hint" id="sync-status"></p>' +
       '</div>' +
       '<div class="card">' +
@@ -1382,11 +1380,18 @@
       '<p class="hint" id="idb-status">每次保存会自动在本机再存一份历史快照（保留最近 5 份，独立于浏览器缓存）。</p>' +
       '<button class="btn" data-act="restore-idb">恢复最近一份本机备份</button>' +
       '</div>' +
-      ((ghCfg() && ghCfg().token)
-        ? '<p class="hint">✅ 云端自动同步已开启：导入/改动即自动备份到云端仓库 <b>' + DEPLOY_USER + '/' + DEPLOY_REPO + '</b>（账户：' + esc(ghCfg() ? ghCfg().account : '') + '），换设备打开自动拉取，无需手动点。</p>'
-        : MODE === 'server'
-        ? '<p class="hint">数据存在本机 E 盘文件里（账户：' + esc(session.username) + '）。</p>'
-        : '<p class="hint">⚠️ 云端令牌未就绪，正在自动初始化…稍后重开「我的」即可。</p>') +
+      '<div class="card">' +
+      '<div class="lbl">备考进度提醒</div>' +
+      '<p class="hint">选一个目标日（如考研 / 开学），软件会算出「每天至少背多少张」并在复习页顶部提醒你。</p>' +
+      '<div class="plan-preview" id="plan-preview">' + planPreviewText() + '</div>' +
+      '<label class="lbl">我的每日背诵目标（张）</label>' +
+      '<input id="daily-target" class="inp" type="number" min="1" value="' + ((state.dailyGoal && state.dailyGoal.review) || '') + '" placeholder="如 30（留空=不限量）">' +
+      '<div class="ghbtns">' +
+      '<button class="btn primary" data-act="auto-plan">按目标日自动算</button>' +
+      '<button class="btn" data-act="save-plan">保存目标</button>' +
+      '</div>' +
+      '<p class="hint">提示：先到上方「备考倒计时」添加「考研」或「开学」日期，这里才能自动算；保存后复习页顶部会显示倒计时与每日任务量。</p>' +
+      '</div>' +
       '<p class="hint" style="text-align:center;opacity:.65;margin-top:14px">版本 ' + APP_VERSION + '　·　看到这个版本号说明已是最新版</p>';
     setTimeout(refreshBackupStatus, 30);
     var imp = $('importer');
@@ -1506,6 +1511,20 @@
       var ci = parseInt(arg, 10);
       if (state.countdowns && state.countdowns[ci]) { state.countdowns.splice(ci, 1); save(); render(); }
       return;
+    }
+    if (act === 'auto-plan') {
+      var pp = planInfo();
+      if (!pp) { toast('请先在上方「备考倒计时」添加目标日（如考研）'); return; }
+      state.dailyGoal = state.dailyGoal || {};
+      state.dailyGoal.review = pp.perDay;
+      var dtEl = $('daily-target'); if (dtEl) dtEl.value = pp.perDay;
+      save(); toast('已按「' + pp.name + '」自动算出：每天至少背 ' + pp.perDay + ' 张 ✓'); return;
+    }
+    if (act === 'save-plan') {
+      var v = parseInt(val('daily-target').trim(), 10);
+      state.dailyGoal = state.dailyGoal || {};
+      state.dailyGoal.review = (v > 0) ? v : 0;
+      save(); toast(v > 0 ? ('每日目标已设为 ' + v + ' 张') : '已取消每日目标（不限量）'); render(); return;
     }
 
     if (act === 'add') {
