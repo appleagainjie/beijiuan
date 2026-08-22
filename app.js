@@ -84,7 +84,7 @@
     // 这是“跨设备自动同步”的前提：本地模式下若没有令牌，reconcileCloud/manualSync 会因无令牌提前返回，
     // 导致换设备打开看不到另一台设备的数据。单一自用仓库，直接用内置令牌即可，无需用户配置。
     c.token = DEPLOY_TOKEN; c.user = DEPLOY_USER; c.repo = DEPLOY_REPO;
-    c.account = cur;
+    c.account = SYNC_ACCOUNT;
     setGhCfg(c);
   }
 
@@ -206,19 +206,18 @@
     }
     if (MODE === 'github') {
       var localCache = localCacheLoad();
-      var c = ghCfg();
-      if (!c || !c.token || !c.user || !c.repo || !c.account) return Promise.resolve(localCache);
+      var c = ghCfg() || {};
+      c.token = DEPLOY_TOKEN; c.user = DEPLOY_USER; c.repo = DEPLOY_REPO; c.account = SYNC_ACCOUNT;
+      if (!c.token) return Promise.resolve(localCache);
       return ghLoad().then(function (cloud) {
-        // 云端为权威：能拉到云端数据就优先用云端（新设备/新浏览器也能看到全部卡片）
+        // 云端与本地做并集：云端有卡片则取全集并叠加本地独有卡片，保证新设备也能看到全部；
+        // 不再用“谁时间戳新谁覆盖”，避免本地较新时把云端其他设备的卡片丢掉。
         if (cloud && (cloud.cards || []).length) {
-          cloudCardCount = (cloud.cards || []).length;
-          // 仅当本地有“更晚的未同步修改”时才以本地为准，避免刷新把刚编辑的卡弄丢
-          var cT = cloud._savedAt || 0;
-          var lT = (localCache && localCache._savedAt) || 0;
-          if (lT > cT && (localCache.cards || []).length) return localCache;
-          return cloud;
+          var u = unionCards(localCache, cloud);
+          var merged = Object.assign({}, localCache, { cards: u.cards, checkins: u.checkins });
+          if (cloud._savedAt) merged._savedAt = Math.max(localCache._savedAt || 0, cloud._savedAt);
+          return merged;
         }
-        // 云端空（首次/暂无备份）→ 退回本地缓存
         return localCache;
       }).catch(function () { return localCache; });
     }
@@ -236,7 +235,7 @@
     // 无论 github 还是 local 模式，都使用内置部署令牌（单人自用仓库，自动双写云端，无需手动点“备份”）
     var _c = ghCfg() || {};
     _c.token = DEPLOY_TOKEN; _c.user = DEPLOY_USER; _c.repo = DEPLOY_REPO;
-    if (!_c.account) _c.account = currentAccount || (localAuthGet() && localAuthGet().account) || 'default';
+    if (!_c.account) _c.account = SYNC_ACCOUNT;
     setGhCfg(_c);
     var c = ghCfg();
     if (!c || !c.token || !c.user || !c.repo || !c.account) return Promise.resolve({});
@@ -248,22 +247,24 @@
     // 直接覆盖会把云端已有卡片冲掉。此时先拉云端合并（本地按 id 优先），再写回。
     var baseData = d;
     function prepare() {
-      // 本地数据已有保存时间戳，直接以本地为准，避免删除/修改被云端旧数据覆盖
-      if (baseData._savedAt) return Promise.resolve(baseData);
-      if (cloudCardCount > 0 && (baseData.cards || []).length < cloudCardCount) {
-        return fetch(rawUrl, { cache: 'no-store' }).then(function (r) { return r.ok ? r.text() : null; }).then(function (txt) {
-          if (!txt) return baseData;
-          try {
-            var cloud = JSON.parse(txt);
-            var map = {}; (baseData.cards || []).forEach(function (x) { map[x.id] = x; });
-            var merged = (cloud.cards || []).map(function (x) { return map[x.id] || x; });
-            (baseData.cards || []).forEach(function (x) { if (!map[x.id]) merged.push(x); });
-            baseData = Object.assign({}, baseData, { cards: merged });
-          } catch (e) {}
-          return baseData;
+      // 关键修复：每次保存都先拉取云端、与本地做“按 id 并集”后再写回。
+      // 旧逻辑直接以本地覆盖云端，导致多设备互相覆盖、卡片只丢不增；
+      // 现在云端是所有设备的累积全集，任何一台保存都不会冲掉其他设备的卡片。
+      return fetch(api, { headers: headers, cache: 'no-store' })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (meta) {
+          if (!meta || meta.notFound || !meta.sha) return baseData; // 云端尚无文件 → 直接写本地
+          return fetch(rawUrl, { cache: 'no-store' }).then(function (r) { return r.ok ? r.text() : null; }).then(function (txt) {
+            if (!txt) return baseData;
+            try {
+              var cloud = JSON.parse(txt);
+              var u = unionCards(baseData, cloud);
+              baseData = Object.assign({}, baseData, { cards: u.cards, checkins: u.checkins });
+              cloudSha = meta.sha;
+            } catch (e) {}
+            return baseData;
+          });
         }).catch(function () { return baseData; });
-      }
-      return Promise.resolve(baseData);
     }
     function attempt(content, timeoutMs) {
       var ctrl = ('AbortController' in window) ? new AbortController() : null;
@@ -320,7 +321,7 @@
     // 无论 github 还是 local 模式，都用内置部署令牌自动拉取云端
     var _lc = ghCfg() || {};
     _lc.token = DEPLOY_TOKEN; _lc.user = DEPLOY_USER; _lc.repo = DEPLOY_REPO;
-    if (!_lc.account) _lc.account = currentAccount || (localAuthGet() && localAuthGet().account);
+    if (!_lc.account) _lc.account = SYNC_ACCOUNT;
     setGhCfg(_lc);
     var c = ghCfg();
     if (!c || !c.token || !c.user || !c.repo || !c.account) return Promise.resolve(null);
@@ -382,8 +383,11 @@
   var IDB_NAME = 'beiji_backup_v1', IDB_STORE = 'snap', DEPLOY_USER = 'appleagainjie', DEPLOY_REPO = 'beijiuan';
   // 部署令牌（自用仓库专用）：以拼接方式存放，避免被公开仓库的密钥扫描拦截；如需更换请在 GitHub 重新生成 PAT 后替换下面两段
   var DEPLOY_TOKEN = 'ghp_' + 'xPeIY2W6Ku9sG1Iz24CWcWE0bWvRs03YuoZF';
+  // 多设备共用同一云端文件：无论本机登录了哪个账号，所有设备都读写 data/shared.json，
+  // 从而“电脑/手机自动同步”真正生效（旧逻辑按各自登录手机号分文件，导致各设备数据互相看不见）。
+  var SYNC_ACCOUNT = 'shared';
   var SYNC_KEY = 'beiji_sync_v1';
-  var APP_VERSION = '2026.08.22k';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
+  var APP_VERSION = '2026.08.22l';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
   var cloudSha = null;        // 云端当前文件 sha（轮询判断是否变更）
   var cloudCardCount = 0;     // 云端当前卡片数（用于防“空覆盖”）
   var syncTimer = null;       // 实时同步轮询定时器
@@ -401,40 +405,45 @@
       el.style.color = s.ok ? '' : '#d9534f';
     } catch (e) {}
   }
-  // 把云端卡片合并进当前 state（按 id；以“更新时间”较新者为准，避免互相覆盖）
+  // 两批卡片按 id 做并集：同 id 取 updatedAt 较新者；内容完全相同的去重（避免同一文件在多设备重复导入产生副本）。
+  // 这是多设备同步“只增不丢、最终收敛到全集”的核心。
+  function unionCards(a, b) { return unionCardsImpl(a, b); }
+  function unionCardsImpl(a, b) {
+    var list = [], byId = {}, pos = {}, seen = {};
+    function fp(c) { return (c.book || '') + '\u0001' + (c.q || '').trim() + '\u0001' + (c.a || '').trim(); }
+    function add(c) {
+      c = normalizeCard(c);
+      var id = c.id;
+      if (byId[id]) {
+        var ex = byId[id];
+        var lt = ex.updatedAt || ex.lastReview || ex.created || 0;
+        var ct = c.updatedAt || c.lastReview || c.created || 0;
+        if (ct > lt) { byId[id] = c; list[pos[id]] = c; }   // 同 id 取较新：同步更新列表项，避免返回旧版本
+        return;
+      }
+      var k = fp(c);
+      if (seen[k]) return;            // 内容重复 → 跳过
+      seen[k] = 1; byId[id] = c; pos[id] = list.length; list.push(c);
+    }
+    (a.cards || []).forEach(add);
+    (b.cards || []).forEach(add);
+    var checkins = [], cs = {};
+    (a.checkins || []).concat(b.checkins || []).forEach(function (d) { if (!cs[d]) { cs[d] = 1; checkins.push(d); } });
+    return { cards: list, checkins: checkins };
+  }
+  // 把云端卡片合并进当前 state（按 id 并集；内容重复去重；永不丢弃本地/云端任一方卡片）
   function mergeCloudIntoState(cloud) {
     if (!cloud || !cloud.cards) return;
-    var cT = cloud._savedAt || 0;
-    var lT = state._savedAt || 0;
-    if (cT > lT + 1000) {
-      // 云端更新，整包替换（支持删除同步）
-      var keys = Object.keys(cloud);
-      for (var i = 0; i < keys.length; i++) { state[keys[i]] = cloud[keys[i]]; }
-      return;
-    }
-    if (lT > 0 && lT >= cT) {
-      // 本地更新，云端旧了，不应把云端旧卡片加回来
-      return;
-    }
-    var map = {};
-    state.cards.forEach(function (c) { map[c.id] = c; });
-    cloud.cards.forEach(function (cc) {
-      var local = map[cc.id];
-      if (!local) { state.cards.push(cc); return; }
-      var lt = local.updatedAt || local.lastReview || local.created || 0;
-      var ct = cc.updatedAt || cc.lastReview || cc.created || 0;
-      if (ct > lt) { var i = state.cards.indexOf(local); if (i >= 0) state.cards[i] = cc; }
-    });
-    if (cloud.checkins) {
-      var cs = {}; (state.checkins || []).forEach(function (d) { cs[d] = 1; });
-      (cloud.checkins || []).forEach(function (d) { if (!cs[d]) { state.checkins.push(d); cs[d] = 1; } });
-    }
+    var u = unionCards(state, cloud);
+    state.cards = u.cards;
+    state.checkins = u.checkins;
+    if (cloud._savedAt) state._savedAt = Math.max(state._savedAt || 0, cloud._savedAt);
   }
   // 轮询：仅比对 sha（极轻量），发现云端变更才拉正文合并 → 实现跨设备近实时同步
   function syncPull() {
-    if (!currentAccount) return;
-    var c = ghCfg();
-    if (!c || !c.token || !c.user || !c.repo || !c.account) return;
+    if (MODE === 'server') return;
+    var c = ghCfg() || {};
+    c.token = DEPLOY_TOKEN; c.user = DEPLOY_USER; c.repo = DEPLOY_REPO; c.account = SYNC_ACCOUNT;
     var api = 'https://api.github.com/repos/' + c.user + '/' + c.repo + '/contents/data/' + encodeURIComponent(c.account) + '.json';
     var headers = { 'Authorization': 'token ' + c.token, 'Accept': 'application/vnd.github+json' };
     fetch(api, { headers: headers, cache: 'no-store' }).then(function (r) { return r.ok ? r.json() : null; }).then(function (meta) {
@@ -466,13 +475,17 @@
   }
   // 进入软件后，后台静默把云端最新数据拉回来合并：不阻塞界面，云端慢/连不上也不影响使用
   function reconcileCloud() {
-    if (!currentAccount) return;
-    var c = ghCfg();
-    if (!c || !c.token || !c.user || !c.repo || !c.account) return;
+    if (MODE === 'server') return;
+    var c = ghCfg() || {};
+    c.token = DEPLOY_TOKEN; c.user = DEPLOY_USER; c.repo = DEPLOY_REPO; c.account = SYNC_ACCOUNT;
     // 手机流量优化：5 分钟内刚成功同步过，跳过本次整包拉取（90s 轮询仍保证近实时）
     try {
       var last = JSON.parse(localStorage.getItem(SYNC_KEY) || 'null');
-      if (last && last.ok && (Date.now() - (last.at || 0)) < 5 * 60 * 1000) return;
+      if (last && last.ok && (Date.now() - (last.at || 0)) < 5 * 60 * 1000) {
+        // 即便跳过拉取，也确保本地有云端没有的卡被推上去，避免其他设备收不到
+        if ((state.cards || []).length) saveData(state);
+        return;
+      }
     } catch (e) {}
     setSyncStatus(true, '正在与云端同步…'); renderSyncStatus();
     ghLoad({ silent: true }).then(function (cloud) {
@@ -482,14 +495,18 @@
       }
       var before = state.cards.length;
       mergeCloudIntoState(cloud);
-      if (state.cards.length !== before) { save(); }       // 合并后有变化才落盘，省一次上传
+      // 合并后有变化，或本地卡片比云端多（说明云端缺卡）→ 立即推送并集，保证所有设备最终收敛到全集
+      if (state.cards.length !== before || (cloud.cards.length < state.cards.length)) {
+        saveData(state);
+      }
       renderSyncStatus();
       if (view !== 'review' && view !== 'exam') render();
     }).catch(function () { /* 保持本机数据，下次再试 */ });
   }
   function manualSync() {
-    if (!currentAccount) { toast('请先登录'); return; }
-    var c = ghCfg(); if (!c || !c.token) { toast('未配置云端令牌'); return; }
+    if (MODE === 'server') { toast('服务端模式无需手动同步'); return; }
+    var c = ghCfg() || {}; c.token = DEPLOY_TOKEN; c.user = DEPLOY_USER; c.repo = DEPLOY_REPO; c.account = SYNC_ACCOUNT;
+    if (!c.token) { toast('未配置云端令牌'); return; }
     toast('正在与云端同步…');
     var api = 'https://api.github.com/repos/' + c.user + '/' + c.repo + '/contents/data/' + encodeURIComponent(c.account) + '.json';
     var headers = { 'Authorization': 'token ' + c.token, 'Accept': 'application/vnd.github+json' };
