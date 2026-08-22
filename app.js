@@ -392,7 +392,7 @@
   // 从而“电脑/手机自动同步”真正生效（旧逻辑按各自登录手机号分文件，导致各设备数据互相看不见）。
   var SYNC_ACCOUNT = 'shared';
   var SYNC_KEY = 'beiji_sync_v1';
-  var APP_VERSION = '2026.08.22m';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
+  var APP_VERSION = '2026.08.22n';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
   var cloudSha = null;        // 云端当前文件 sha（轮询判断是否变更）
   var cloudCardCount = 0;     // 云端当前卡片数（用于防“空覆盖”）
   var syncTimer = null;       // 实时同步轮询定时器
@@ -412,12 +412,12 @@
       el.style.color = s.ok ? '' : '#d9534f';
     } catch (e) {}
   }
-  // 两批卡片按 id 做并集：同 id 取 updatedAt 较新者；内容完全相同的去重（避免同一文件在多设备重复导入产生副本）。
+  // 两批卡片按 id 做并集：同 id 取 updatedAt 较新者（仅覆盖“同一张卡”的旧版本）；不同 id 一律保留。
+  // 绝不按“内容相同”删除任何卡片（用户明确要求：不要删除任何记录，以防万一全部失效）。
   // 这是多设备同步“只增不丢、最终收敛到全集”的核心。
   function unionCards(a, b) { return unionCardsImpl(a, b); }
   function unionCardsImpl(a, b) {
-    var list = [], byId = {}, pos = {}, seen = {};
-    function fp(c) { return (c.book || '') + '\u0001' + (c.q || '').trim() + '\u0001' + (c.a || '').trim(); }
+    var list = [], byId = {}, pos = {};
     function add(c) {
       c = normalizeCard(c);
       var id = c.id;
@@ -425,12 +425,10 @@
         var ex = byId[id];
         var lt = ex.updatedAt || ex.lastReview || ex.created || 0;
         var ct = c.updatedAt || c.lastReview || c.created || 0;
-        if (ct > lt) { byId[id] = c; list[pos[id]] = c; }   // 同 id 取较新：同步更新列表项，避免返回旧版本
+        if (ct > lt) { byId[id] = c; list[pos[id]] = c; }   // 同 id 取较新：仅覆盖“同一张卡”的旧版本，绝不丢弃其他卡
         return;
       }
-      var k = fp(c);
-      if (seen[k]) return;            // 内容重复 → 跳过
-      seen[k] = 1; byId[id] = c; pos[id] = list.length; list.push(c);
+      byId[id] = c; pos[id] = list.length; list.push(c);
     }
     (a.cards || []).forEach(add);
     (b.cards || []).forEach(add);
