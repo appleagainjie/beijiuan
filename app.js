@@ -383,7 +383,7 @@
   // 部署令牌（自用仓库专用）：以拼接方式存放，避免被公开仓库的密钥扫描拦截；如需更换请在 GitHub 重新生成 PAT 后替换下面两段
   var DEPLOY_TOKEN = 'ghp_' + 'xPeIY2W6Ku9sG1Iz24CWcWE0bWvRs03YuoZF';
   var SYNC_KEY = 'beiji_sync_v1';
-  var APP_VERSION = '2026.08.22g';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
+  var APP_VERSION = '2026.08.22h';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
   var cloudSha = null;        // 云端当前文件 sha（轮询判断是否变更）
   var cloudCardCount = 0;     // 云端当前卡片数（用于防“空覆盖”）
   var syncTimer = null;       // 实时同步轮询定时器
@@ -2061,61 +2061,82 @@
       return '<div>' + e + '</div>';
     }).join('');
   }
-  function makeCloze(heading, body) {
-    var h = heading ? heading : '';
-    var b = body ? body : '';
-    var pts = extractSmallPoints(b);
-    if (pts.length >= 2) return { q: h + '\n（共 ' + pts.length + ' 个要点：先默写，再点「显示答案」核对）', a: (h ? h + '\n' : '') + b, cloze: true, points: pts };
-    return { q: h, a: (h ? h + '\n' : '') + b, cloze: true, points: pts };
+    function makeCloze(qText, aText) {
+    var pts = extractSmallPoints(aText);
+    return { q: qText, a: aText, cloze: true, points: pts };
+  }
+  // 把一段正文按“同行的多个 ①②③ 或 （1）（2）”拆成多个子点文本：细分但保留全部内容
+  function splitBodyIntoSubpoints(body) {
+    if (!body || !body.trim()) return [];
+    var re = /[①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳][^①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳]*/g;
+    var ms = body.match(re);
+    if (ms && ms.length >= 2) return ms;
+    var re2 = /（\d+）[^（]*/g;
+    var ms2 = body.match(re2);
+    if (ms2 && ms2.length >= 2) return ms2;
+    return [body];
   }
   function parseCloze(text) {
-    // 去段首项目符号、按换行切段、去空行（全程保留 ①②③、（一）、数字序号等正文，不删任何内容）
+    // 去段首项目符号、按换行切段、去空行；正文里 ①②③、（一）、数字序号全部保留，不删任何内容
     var paras = (text || '').replace(/\r/g, '').split(String.fromCharCode(10))
       .map(function (s) { return stripBullet(s).trim(); }).filter(Boolean);
-    function isL1(p) {
-      return /^[一二三四五六七八九十]+[、．.]/.test(p) || /^第[一二三四五六七八九十]+篇[、．.]/.test(p);
+    function levelOf(p) {
+      if (/^第[一二三四五六七八九十]+篇[、．.]/.test(p)) return 0;       // 篇
+      if (/^[一二三四五六七八九十]+[、．.]/.test(p)) return 1;            // 章 一、二、
+      if (/^（[一二三四五六七八九十]+）/.test(p)) return 2;              // 大点 （一）
+      if (/^\d+[\.．、]/.test(p)) return 3;                             // 编号点 1. 2.
+      if (/^（\d+）/.test(p)) return 4;                                  // 子点 (1)
+      return -1;                                                        // 说明段（含以 ① 开头的行：同行挤着的 ①②③ 一律归入父节点 body，由 splitBodyIntoSubpoints 细分）
+    }
+    // 建层级树：说明段挂在栈顶节点；序号行按层级入栈/出栈
+    var root = { level: -2, title: '', body: [], children: [] };
+    var stack = [root];
+    for (var i = 0; i < paras.length; i++) {
+      var p = paras[i], lv = levelOf(p);
+      if (lv === -1) {
+        stack[stack.length - 1].body.push(p);
+      } else {
+        while (stack.length > 1 && stack[stack.length - 1].level >= lv) stack.pop();
+        var node = { level: lv, title: p, body: [], children: [] };
+        stack[stack.length - 1].children.push(node);
+        stack.push(node);
+      }
     }
     var items = [];
-    var pre = [], title = null, buf = [], pendingChapter = null;
-    function flush() {
-      if (title === null && buf.length === 0) return;
-      var body = buf.join('\n');
-      var t = title !== null ? title : (buf[0] || '');
-      var bb = title !== null ? body : buf.slice(1).join('\n');
-      if (pendingChapter && t !== pendingChapter) { bb = pendingChapter + '\n' + bb; pendingChapter = null; }
-      if (bb.trim()) items.push(makeCloze(t, bb));
-      else if (/^第.+篇/.test(t)) pendingChapter = t;   // 空章：暂存标题，并入下一段，保证不丢
-      else items.push(makeCloze(t, t));                 // 其他空节：标题即内容，保证不丢
-    }
-    for (var i = 0; i < paras.length; i++) {
-      if (isL1(paras[i])) {
-        if (title === null && buf.length === 0) { buf = pre.concat(buf); pre = []; } // 首个一级标题前的前言并入本节
-        flush();
-        title = paras[i]; buf = [];
-      } else {
-        if (title === null) pre.push(paras[i]); else buf.push(paras[i]);
-      }
-    }
-    flush();
-    if (pendingChapter) items.push(makeCloze(pendingChapter, pendingChapter));
-    // 兜底：没有任何一级标题时，退回“带序号/高亮的行即要点”的旧逻辑（兼容帽子题等）
-    if (!items.length) {
-      for (var k = 0; k < paras.length; k++) {
-        var line = paras[k];
-        var pts = countPoints(line);
-        if (pts.length < 2) pts = extractKeySegments(line).length ? extractKeySegments(line) : [];
-        if (pts.length >= 2) {
-          items.push(makeCloze(findHeading(paras, k), pts.map(function (p, idx) { return circled(idx + 1) + p; }).join('')));
-        } else if (pts.length === 1) {
-          var hd = findHeading(paras, k);
-          if (hd) items.push(makeCloze(hd, pts.map(function (p, idx) { return circled(idx + 1) + p; }).join('')));
+    function joinPrefix(arr) { return arr.join(' › '); }
+    function walk(node, prefixTitles) {
+      var childPrefix = prefixTitles.concat(node.title ? [node.title] : []);
+      if (node.children.length === 0) {
+        // 叶子：成卡。若 body 含多个 ①②③/(1) 则再细分
+        var bodyText = node.body.join('\n');
+        var subs = splitBodyIntoSubpoints(bodyText);
+        var head = (prefixTitles.length ? prefixTitles.join('\n') + '\n' : '') + (node.title ? node.title + '\n' : '');
+        if (subs.length <= 1) {
+          items.push(makeCloze(joinPrefix(childPrefix), head + bodyText));
+        } else {
+          subs.forEach(function (sc) {
+            var sm = sc.match(/^[①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳]/);
+            var label = sm ? sm[0] : '';
+            var first = sc.replace(/^[①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳]\s*/, '').slice(0, 22);
+            items.push(makeCloze(joinPrefix(childPrefix) + ' › ' + label + first, head + sc));
+          });
         }
+      } else {
+        // 容器：自身说明段下传到第一个子节点（保证不删）；标题作为层级前缀下传
+        if (node.body.length && node.children.length) {
+          node.children[0].body = node.body.concat(node.children[0].body);
+        }
+        node.children.forEach(function (c) { walk(c, childPrefix); });
       }
+    }
+    root.children.forEach(function (c) { walk(c, []); });
+    // 文件开头的前言（如书名、协作提示）保留为第一张卡
+    if (root.body.length) {
+      items.unshift(makeCloze(root.body[0], root.body.join('\n')));
     }
     return items;
   }
-
-  function detectMode(text) {
+function detectMode(text) {
     var qa = 0, know = 0, cloze = 0;
     if (/[①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳]/.test(text)) cloze += 3;
     if ((text.match(/（\d+）/g) || []).length >= 2) cloze += 2;
