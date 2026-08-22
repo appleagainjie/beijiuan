@@ -383,7 +383,7 @@
   // 部署令牌（自用仓库专用）：以拼接方式存放，避免被公开仓库的密钥扫描拦截；如需更换请在 GitHub 重新生成 PAT 后替换下面两段
   var DEPLOY_TOKEN = 'ghp_' + 'xPeIY2W6Ku9sG1Iz24CWcWE0bWvRs03YuoZF';
   var SYNC_KEY = 'beiji_sync_v1';
-  var APP_VERSION = '2026.08.22i';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
+  var APP_VERSION = '2026.08.22j';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
   var cloudSha = null;        // 云端当前文件 sha（轮询判断是否变更）
   var cloudCardCount = 0;     // 云端当前卡片数（用于防“空覆盖”）
   var syncTimer = null;       // 实时同步轮询定时器
@@ -2087,16 +2087,14 @@
     if (segs.length < 2) return null;
     return segs;
   }
-  // 去掉标题末尾的考试标注括号，如 （18名解；26简答）/（概念、原则）
+  // 标题原样保留：用户明确要求“任何内容不能少”，故不再删除标题里的考试标注括号
+  // （如 （26简答）/（15名解）/（一般不会考）/（考到的概率很小）/（GDP）/（概念、原则） 等）
   function stripExamNote(t) {
-    return t.replace(/[（(][^（）]*\d[^（）]*(名解|简答|论述|名辨|复论|复简|复试|辨析)[^（）]*[）)]$/, '')
-         .replace(/[（(][^（）]*\d{2,}[^（）]*[）)]$/, '')
-         .replace(/[（(][^（）\d]{1,18}[）)]$/, '')
-         .trim();
+    return t;
   }
-  // 子点标题去“N.”与“（补充）”前缀，便于清爽显示
+  // 子点标题原样保留（含列表序号 N. 与（补充）前缀与考试标注），不删内容
   function cleanSubTitle(t) {
-    return stripExamNote(t.replace(/^\d+[\.．、]\s*/, '').replace(/^（补充）\s*/, ''));
+    return t;
   }
   // 从命名子概念文本里取概念名（换行 / 冒号 / 首个圆点序号 ① 处断词；并去行首 （n） 前缀）
   function conceptName(text) {
@@ -2114,19 +2112,22 @@
   function parseCloze(text) {
     var paras = (text || '').replace(/\r/g, '').split(String.fromCharCode(10))
       .map(function (s) { return stripBullet(s).trim(); }).filter(Boolean);
-    function isChapter(p) { return /^[一二三四五六七八九十]+[、．.]/.test(p) || /^第[一二三四五六七八九十]+篇[、．.]/.test(p); }
-    function isBig(p) { return /^（[一二三四五六七八九十]+）/.test(p); }
-    function isSub(p) { return /^\d+[\.．、]/.test(p) || /^（补充）/.test(p); }
-    // 建树：篇/章/大点(lv<=1) 为容器，子点(lv2) 成卡，说明段挂栈顶
+    function isPart(p) { return /^第[一二三四五六七八九十]+篇[、．.]/.test(p); }   // 篇（最高级容器）
+    function isChapter(p) { return /^[一二三四五六七八九十]+[、．.]/.test(p); }     // 章
+    function isBig(p) { return /^（[一二三四五六七八九十]+）/.test(p); }             // 大点（一）（二）
+    function isSub(p) { return /^\d+[\.．、]/.test(p) || /^（补充）/.test(p); }      // 子点（N. / （补充））
+    // 建树层级：篇 lv-1 > 章 lv0 > 大点 lv1 > 子点 lv2(成卡)；说明段 lv=-9 挂栈顶 body
+    // 关键：篇必须比章低一层，否则章出现时会把篇从栈里弹掉，导致“第一篇”整章标题丢失
     var root = { lv: -2, title: '', body: [], children: [] };
     var stack = [root];
     for (var i = 0; i < paras.length; i++) {
       var p = paras[i], lv;
-      if (isChapter(p)) lv = 0;
+      if (isPart(p)) lv = -1;
+      else if (isChapter(p)) lv = 0;
       else if (isBig(p)) lv = 1;
       else if (isSub(p)) lv = 2;
-      else lv = -1;
-      if (lv === -1) { stack[stack.length - 1].body.push(p); }
+      else lv = -9;
+      if (lv === -9) { stack[stack.length - 1].body.push(p); }
       else {
         while (stack.length > 1 && stack[stack.length - 1].lv >= lv) stack.pop();
         var node = { lv: lv, title: p, body: [], children: [] };
@@ -2144,12 +2145,11 @@
         items.push(makeCloze(titlePrefix, (title ? title + '\n' : '') + body));
         return;
       }
-      // 概述卡：首个子概念标记之前的引言 + 子概念清单
+      // 有命名子概念：引言单独成卡（全内容）；每个子概念独立成卡（全内容）。
+      // 不再生成“主要包括：…”概述卡——那张卡只放截断的名字，看起来像删了内容。
       var firstIdx = body.indexOf(subs[0].marker);
       var intro = firstIdx > 0 ? body.slice(0, firstIdx).replace(/[\s：:、，,]+$/, '') : '';
-      var names = subs.map(function (s) { return conceptName(s.text); });
-      var overviewA = (intro ? intro + '\n' : '') + '主要包括：' + names.join('、') + '。';
-      items.push(makeCloze(titlePrefix, overviewA));
+      if (intro) items.push(makeCloze(titlePrefix, intro));
       subs.forEach(function (s) {
         var nm = conceptName(s.text);
         items.push(makeCloze(titlePrefix + ' › ' + nm, s.marker + s.text));
@@ -2160,6 +2160,11 @@
       var newPrefix = prefix.concat(cleanTitle ? [cleanTitle] : []);
       if (node.lv === 2) { flushSub(node, prefix); return; }
       if (node.body.length && node.children.length) node.children[0].body = node.body.concat(node.children[0].body);
+      else if (node.body.length && !node.children.length) {
+        // 纯容器/叶子但无子节点：整段说明进答案，避免“只有说明段没有子点”时被整段丢失
+        items.push(makeCloze((prefix.length ? prefix.join(' › ') + ' › ' : '') + (cleanTitle || ''),
+          (cleanTitle ? cleanTitle + '\n' : '') + node.body.join('\n')));
+      }
       node.children.forEach(function (c) { walk(c, newPrefix); });
     }
     root.children.forEach(function (c) { walk(c, []); });
