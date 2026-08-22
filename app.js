@@ -167,7 +167,7 @@
       body: body ? JSON.stringify(body) : undefined
     }).then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { j._status = r.status; return j; }); });
   }
-  function saveData(d) {
+  function saveData(d, action) {
     // 所有保存都带时间戳，作为多设备冲突/删除判断依据
     d._savedAt = Date.now();
     if (MODE === 'server') {
@@ -189,13 +189,13 @@
         try { localStorage.setItem(dataKey(currentAccount) + '_meta', JSON.stringify({ savedAt: Date.now(), size: j2.length })); } catch (e2) {}
       }
       idbBackup(d);
-      return ghSave(d, j2);
+      return ghSave(d, j2, action);
     }
     if (json) {
       try { localStorage.setItem(dataKey(currentAccount), json); } catch (e) { toast('保存失败：存储可能已满'); }
     }
     idbBackup(d);
-    return ghSave(d);   // 本地模式也自动双写云端（内置令牌始终可用），导入/改动即自动备份，无需手动点“备份”
+    return ghSave(d, null, action);   // 本地模式也自动双写云端（内置令牌始终可用），导入/改动即自动备份，无需手动点“备份”
   }
   function loadData() {
     if (MODE === 'server') {
@@ -231,11 +231,11 @@
     } catch (e) {}
     return Promise.resolve(emptyState());
   }
-  function ghSave(d, prejson) {
+  function ghSave(d, prejson, action) {
     // 无论 github 还是 local 模式，都使用内置部署令牌（单人自用仓库，自动双写云端，无需手动点“备份”）
     var _c = ghCfg() || {};
     _c.token = DEPLOY_TOKEN; _c.user = DEPLOY_USER; _c.repo = DEPLOY_REPO;
-    if (!_c.account) _c.account = SYNC_ACCOUNT;
+    _c.account = SYNC_ACCOUNT;   // 强制统一写入共享云端文件，根治旧版按手机号分文件导致各设备互相看不见
     setGhCfg(_c);
     var c = ghCfg();
     if (!c || !c.token || !c.user || !c.repo || !c.account) return Promise.resolve({});
@@ -260,6 +260,7 @@
               var cloud = JSON.parse(txt);
               var u = unionCards(baseData, cloud);
               baseData = Object.assign({}, baseData, { cards: u.cards, checkins: u.checkins });
+              baseData.syncLog = mergeSyncLog(baseData.syncLog, cloud.syncLog);  // 备份/同步记录也按并集累积，不丢历史
               cloudSha = meta.sha;
             } catch (e) {}
             return baseData;
@@ -294,6 +295,9 @@
       }, function (e) { clearT(); throw e; }).then(function (res) { clearT(); return res; });
     }
     return prepare().then(function (finalData) {
+      finalData = appendSyncLog(finalData, action || 'backup');   // 每次云端写入都留一笔记录（备份/同步），永不删除
+      cloudSyncLog = (finalData.syncLog || []).slice();
+      persistSyncLog();
       var content = utf8ToBase64(JSON.stringify(finalData));
       return attempt(content, 60000).catch(function (e1) {
         // 超时 / 网络抖动 → 自动重试一次（共可达 2 分钟，适应国内慢速链路）
@@ -321,7 +325,7 @@
     // 无论 github 还是 local 模式，都用内置部署令牌自动拉取云端
     var _lc = ghCfg() || {};
     _lc.token = DEPLOY_TOKEN; _lc.user = DEPLOY_USER; _lc.repo = DEPLOY_REPO;
-    if (!_lc.account) _lc.account = SYNC_ACCOUNT;
+    _lc.account = SYNC_ACCOUNT;   // 强制统一读取共享云端文件
     setGhCfg(_lc);
     var c = ghCfg();
     if (!c || !c.token || !c.user || !c.repo || !c.account) return Promise.resolve(null);
@@ -362,6 +366,7 @@
       if (e1 && (e1.name === 'AbortError' || /timeout|Failed to fetch|network/i.test(e1.message || ''))) return attempt(30000);
       throw e1;
     }).then(function (res) {
+      if (res && res.syncLog) { cloudSyncLog = res.syncLog.slice(); persistSyncLog(); }   // 拉到云端即同步记录展示
       if (res && (res.cards || []).length) {
         cloudCardCount = (res.cards || []).length;
         setSyncStatus(true, '已从云端读取 ' + c.account + '（' + cloudCardCount + ' 张）');
@@ -387,10 +392,12 @@
   // 从而“电脑/手机自动同步”真正生效（旧逻辑按各自登录手机号分文件，导致各设备数据互相看不见）。
   var SYNC_ACCOUNT = 'shared';
   var SYNC_KEY = 'beiji_sync_v1';
-  var APP_VERSION = '2026.08.22l';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
+  var APP_VERSION = '2026.08.22m';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
   var cloudSha = null;        // 云端当前文件 sha（轮询判断是否变更）
   var cloudCardCount = 0;     // 云端当前卡片数（用于防“空覆盖”）
   var syncTimer = null;       // 实时同步轮询定时器
+  var cloudSyncLog = [];      // 云端同步记录（备份/同步历史），用于「我的」页展示
+  (function loadSyncLog() { try { var s = JSON.parse(localStorage.getItem('beiji_synclog') || 'null'); if (Array.isArray(s)) cloudSyncLog = s; } catch (e) {} })();
   function setSyncStatus(ok, info) {
     try { localStorage.setItem(SYNC_KEY, JSON.stringify({ ok: ok, info: info || '', at: Date.now() })); } catch (e) {}
   }
@@ -431,6 +438,41 @@
     (a.checkins || []).concat(b.checkins || []).forEach(function (d) { if (!cs[d]) { cs[d] = 1; checkins.push(d); } });
     return { cards: list, checkins: checkins };
   }
+  // 本机设备标识：用于同步记录里标明是哪台设备在备份/同步；可在「我的」页手动改名
+  function deviceTag() {
+    try { var t = localStorage.getItem('beiji_device'); if (t) return t; } catch (e) {}
+    var isMobile = /Mobi|Android|iPhone|iPad|iPod|HarmonyOS/i.test(navigator.userAgent) ||
+      (window.matchMedia && window.matchMedia('(pointer:coarse)').matches);
+    var tag = isMobile ? '手机' : '电脑';
+    try { localStorage.setItem('beiji_device', tag); } catch (e) {}
+    return tag;
+  }
+  function syncActName(a) { return ({ backup: '备份', sync: '同步', 迁移: '迁移' })[a] || a || '同步'; }
+  function fmtTime(ts) { var d = new Date(ts); return pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()); }
+  // 合并两份同步记录（去重 + 按时间排序 + 最多保留 60 条）
+  function mergeSyncLog(a, b) {
+    a = a || []; b = b || [];
+    var seen = {}, out = [];
+    a.concat(b).forEach(function (e) { if (!e) return; var k = (e.at || 0) + '|' + (e.device || '') + '|' + (e.action || ''); if (seen[k]) return; seen[k] = 1; out.push(e); });
+    out.sort(function (x, y) { return x.at - y.at; });
+    if (out.length > 60) out = out.slice(out.length - 60);
+    return out;
+  }
+  // 追加一条同步记录（备份/同步都记一笔，永不删除历史）
+  function appendSyncLog(data, action) {
+    data = data || {};
+    data.syncLog = mergeSyncLog(data.syncLog, [{ at: Date.now(), device: deviceTag(), action: action, cards: (data.cards || []).length }]);
+    return data;
+  }
+  function persistSyncLog() { try { localStorage.setItem('beiji_synclog', JSON.stringify(cloudSyncLog)); } catch (e) {} }
+  function renderSyncLogHtml() {
+    var log = cloudSyncLog || [];
+    if (!log.length) return '<p class="hint">还没有同步记录。点上方「立即备份」或「立即同步」就会产生第一条。</p>';
+    return '<ul class="synclog">' + log.slice().reverse().slice(0, 20).map(function (e) {
+      return '<li><span class="sl-act sl-' + (e.action || 'sync') + '">' + syncActName(e.action) + '</span> <b>' + esc(e.device || '') + '</b> · ' + fmtTime(e.at) + ' · ' + (e.cards || 0) + ' 张</li>';
+    }).join('') + '</ul>';
+  }
+  function renderMineSyncLog() { var el = $('sync-log'); if (el) el.innerHTML = renderSyncLogHtml(); }
   // 把云端卡片合并进当前 state（按 id 并集；内容重复去重；永不丢弃本地/云端任一方卡片）
   function mergeCloudIntoState(cloud) {
     if (!cloud || !cloud.cards) return;
@@ -505,19 +547,23 @@
   }
   function manualSync() {
     if (MODE === 'server') { toast('服务端模式无需手动同步'); return; }
-    var c = ghCfg() || {}; c.token = DEPLOY_TOKEN; c.user = DEPLOY_USER; c.repo = DEPLOY_REPO; c.account = SYNC_ACCOUNT;
-    if (!c.token) { toast('未配置云端令牌'); return; }
-    toast('正在与云端同步…');
-    var api = 'https://api.github.com/repos/' + c.user + '/' + c.repo + '/contents/data/' + encodeURIComponent(c.account) + '.json';
-    var headers = { 'Authorization': 'token ' + c.token, 'Accept': 'application/vnd.github+json' };
-    fetch(api, { headers: headers, cache: 'no-store' }).then(function (r) { return r.ok ? r.json() : null; }).then(function (meta) {
-      if (meta && meta.sha && meta.sha !== cloudSha) {
-        var rawUrl = 'https://raw.githubusercontent.com/' + c.user + '/' + c.repo + '/main/data/' + encodeURIComponent(c.account) + '.json';
-        return fetch(rawUrl, { cache: 'no-store' }).then(function (r) { return r.ok ? r.text() : null; }).then(function (txt) {
-          if (txt) { try { var cloud = JSON.parse(txt); cloudSha = meta.sha; cloudCardCount = (cloud.cards || []).length; var before = state.cards.length; mergeCloudIntoState(cloud); if (state.cards.length !== before) save(); } catch (e) {} }
-        });
+    toast('正在从云端同步最新数据…');
+    // 始终拉取云端最新全集（去掉旧版 sha 门槛）：点「立即同步」一定把云端数据拉到本机，
+    // 与本地做按 id 并集（永不删除任何卡片，只增加/更新），再写回云端并记一笔同步记录。
+    ghLoad({ silent: true }).then(function (cloud) {
+      if (cloud && cloud.cards && cloud.cards.length) {
+        var before = state.cards.length;
+        mergeCloudIntoState(cloud);                 // 并集：永不删除，最新覆盖旧的
+        if (state.cards.length !== before) save();  // 本机先落盘
       }
-    }).then(function () { return saveData(state); }).then(function () { toast('✅ 已与云端同步'); renderSyncStatus(); render(); }).catch(function () { toast('同步失败，稍后重试'); });
+      return saveData(state, 'sync').then(function () {
+        var last = (cloudSyncLog && cloudSyncLog[cloudSyncLog.length - 1]);
+        var msg = '✅ 已与云端同步：本机共 ' + state.cards.length + ' 张';
+        if (last) msg += '（最近：' + (last.device || '') + ' ' + syncActName(last.action) + (last.at ? ' · ' + fmtTime(last.at) : '') + '）';
+        toast(msg);
+        renderSyncStatus(); renderMineSyncLog(); if (view === 'mine') render();
+      });
+    }).catch(function () { toast('同步失败，请检查网络后重试'); });
   }
   function idbOpen() {
     return new Promise(function (res, rej) {
@@ -1412,12 +1458,18 @@
       '</div>' +
       '<div class="card">' +
       '<div class="lbl">数据备份与同步</div>' +
-      '<p class="hint">✅ 云端自动备份已开启：每次保存、导入都自动同步。换手机用<b>同一个手机号</b>登录即可同步全部卡片，无需任何设置。</p>' +
+      '<p class="hint">✅ 云端自动同步已开启：所有设备共用<b>同一个云端文件</b>，每次保存、导入都自动备份；点「立即同步」会把云端<b>最新</b>数据拉到本机。任何卡片都<b>不会被删除</b>，只会增加或更新，旧的也一直保留（防万一全部失效）。</p>' +
       '<div class="ghbtns">' +
       '<button class="btn" data-act="backup-gh">立即备份到云端</button>' +
-      '<button class="btn primary" data-act="sync-now">立即同步（跨设备拉取）</button>' +
+      '<button class="btn primary" data-act="sync-now">立即同步（拉取云端最新）</button>' +
       '</div>' +
+      '<label class="lbl" style="margin-top:8px">本机设备名（显示在同步记录里，可改成「手机1 / 平板」等）</label>' +
+      '<div class="ghbtns"><input id="device-name" class="inp" type="text" value="' + esc(deviceTag()) + '" placeholder="如 手机1 / 电脑"><button class="btn" data-act="save-device">保存设备名</button></div>' +
       '<p class="hint" id="sync-status"></p>' +
+      '</div>' +
+      '<div class="card">' +
+      '<div class="lbl">同步记录（每次备份 / 同步都留一笔，永不删除）</div>' +
+      '<div id="sync-log">' + renderSyncLogHtml() + '</div>' +
       '</div>' +
       '<div class="card">' +
       '<div class="lbl">本机备份（IndexedDB · 抗损坏可回滚）</div>' +
@@ -1655,6 +1707,11 @@
     }
 
     if (act === 'sync-now') { manualSync(); return; }
+    if (act === 'save-device') {
+      var dn = val('device-name').trim();
+      if (dn) { try { localStorage.setItem('beiji_device', dn); } catch (e) {} toast('本机设备名已设为「' + dn + '」'); }
+      return;
+    }
 
     if (act === 'reveal') {
       if (exam) exam.revealed = true;
