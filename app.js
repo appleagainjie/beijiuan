@@ -179,14 +179,15 @@
     var json = '';
     try { json = JSON.stringify(d); } catch (e) {}
     if (MODE === 'github') {
-      // GitHub 模式以仓库文件为权威存储；localStorage 只是离线缓存。
-      // 给数据打上保存时间戳，刷新时与云端比“谁更新”取较新一份，避免云端慢导致丢卡。
       d._savedAt = Date.now();
       var j2 = JSON.stringify(d);
-      if (j2 && j2.length <= 800000) {
-        try { localStorage.setItem(dataKey(currentAccount), j2); } catch (e) {}
-      } else if (j2) {
-        try { localStorage.setItem(dataKey(currentAccount) + '_meta', JSON.stringify({ savedAt: Date.now(), size: j2.length })); } catch (e) {}
+      // 本机始终尝试存完整数据：localStorage 配额约 5MB，当前数据 3MB 完全够存。
+      // 旧逻辑在 >800KB 时只存 _meta 标记，导致清缓存/换设备后本机无任何完整数据 → 数据丢失。
+      try {
+        localStorage.setItem(dataKey(currentAccount), j2);
+      } catch (e) {
+        // 仅当真的超过配额（极少）才降级为只存 meta 标记；IndexedDB 仍有完整快照兜底
+        try { localStorage.setItem(dataKey(currentAccount) + '_meta', JSON.stringify({ savedAt: Date.now(), size: j2.length })); } catch (e2) {}
       }
       idbBackup(d);
       return ghSave(d, j2);
@@ -349,8 +350,8 @@
         }, function (e) { clearT(); throw e; })
         .then(function (res) { clearT(); return res; });
     }
-    return attempt(15000).catch(function (e1) {
-      if (e1 && (e1.name === 'AbortError' || /timeout|Failed to fetch|network/i.test(e1.message || ''))) return attempt(15000);
+    return attempt(30000).catch(function (e1) {
+      if (e1 && (e1.name === 'AbortError' || /timeout|Failed to fetch|network/i.test(e1.message || ''))) return attempt(30000);
       throw e1;
     }).then(function (res) {
       if (res && (res.cards || []).length) {
@@ -375,7 +376,7 @@
   // 部署令牌（自用仓库专用）：以拼接方式存放，避免被公开仓库的密钥扫描拦截；如需更换请在 GitHub 重新生成 PAT 后替换下面两段
   var DEPLOY_TOKEN = 'ghp_' + 'xPeIY2W6Ku9sG1Iz24CWcWE0bWvRs03YuoZF';
   var SYNC_KEY = 'beiji_sync_v1';
-  var APP_VERSION = '2026.08.22b';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
+  var APP_VERSION = '2026.08.22c';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
   var cloudSha = null;        // 云端当前文件 sha（轮询判断是否变更）
   var cloudCardCount = 0;     // 云端当前卡片数（用于防“空覆盖”）
   var syncTimer = null;       // 实时同步轮询定时器
