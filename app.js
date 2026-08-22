@@ -80,11 +80,10 @@
     var cur = currentAccount || (localAuthGet() && localAuthGet().account);
     if (!cur) return;
     var c = ghCfg() || {};
-    if (MODE === 'github') {
-      // GitHub Pages 部署版：云端令牌/仓库已内置，登录即自动开启跨设备同步，无需用户配置。
-      // 关键修复：旧逻辑只写账号名、不写内置令牌，导致新设备登录后 loadData 因“无令牌”提前返回空 → 不同步。
-      c.token = DEPLOY_TOKEN; c.user = DEPLOY_USER; c.repo = DEPLOY_REPO;
-    }
+    // 无论本地模式还是 github 模式，登录即把内置部署令牌写入云端配置。
+    // 这是“跨设备自动同步”的前提：本地模式下若没有令牌，reconcileCloud/manualSync 会因无令牌提前返回，
+    // 导致换设备打开看不到另一台设备的数据。单一自用仓库，直接用内置令牌即可，无需用户配置。
+    c.token = DEPLOY_TOKEN; c.user = DEPLOY_USER; c.repo = DEPLOY_REPO;
     c.account = cur;
     setGhCfg(c);
   }
@@ -196,7 +195,7 @@
       try { localStorage.setItem(dataKey(currentAccount), json); } catch (e) { toast('保存失败：存储可能已满'); }
     }
     idbBackup(d);
-    return Promise.resolve({});
+    return ghSave(d);   // 本地模式也自动双写云端（内置令牌始终可用），导入/改动即自动备份，无需手动点“备份”
   }
   function loadData() {
     if (MODE === 'server') {
@@ -234,13 +233,11 @@
     return Promise.resolve(emptyState());
   }
   function ghSave(d, prejson) {
-    // GitHub Pages 部署：单人自用仓库，无条件使用部署令牌，纠正任何手动填错/过期令牌
-    if (MODE === 'github') {
-      var _c = ghCfg() || {};
-      _c.token = DEPLOY_TOKEN; _c.user = DEPLOY_USER; _c.repo = DEPLOY_REPO;
-      if (!_c.account) _c.account = currentAccount || (localAuthGet() && localAuthGet().account) || 'default';
-      setGhCfg(_c);
-    }
+    // 无论 github 还是 local 模式，都使用内置部署令牌（单人自用仓库，自动双写云端，无需手动点“备份”）
+    var _c = ghCfg() || {};
+    _c.token = DEPLOY_TOKEN; _c.user = DEPLOY_USER; _c.repo = DEPLOY_REPO;
+    if (!_c.account) _c.account = currentAccount || (localAuthGet() && localAuthGet().account) || 'default';
+    setGhCfg(_c);
     var c = ghCfg();
     if (!c || !c.token || !c.user || !c.repo || !c.account) return Promise.resolve({});
     var file = encodeURIComponent(c.account) + '.json';
@@ -309,12 +306,11 @@
   function ghLoad(opts) {
     var silent = !!(opts && opts.silent);  // 后台静默同步时，不要弹 toast 打扰用户
     // GitHub Pages 部署：单人自用仓库，无条件使用部署令牌
-    if (MODE === 'github') {
-      var _lc = ghCfg() || {};
-      _lc.token = DEPLOY_TOKEN; _lc.user = DEPLOY_USER; _lc.repo = DEPLOY_REPO;
-      if (!_lc.account) _lc.account = currentAccount || (localAuthGet() && localAuthGet().account);
-      setGhCfg(_lc);
-    }
+    // 无论 github 还是 local 模式，都用内置部署令牌自动拉取云端
+    var _lc = ghCfg() || {};
+    _lc.token = DEPLOY_TOKEN; _lc.user = DEPLOY_USER; _lc.repo = DEPLOY_REPO;
+    if (!_lc.account) _lc.account = currentAccount || (localAuthGet() && localAuthGet().account);
+    setGhCfg(_lc);
     var c = ghCfg();
     if (!c || !c.token || !c.user || !c.repo || !c.account) return Promise.resolve(null);
     var file = encodeURIComponent(c.account) + '.json';
@@ -376,7 +372,7 @@
   // 部署令牌（自用仓库专用）：以拼接方式存放，避免被公开仓库的密钥扫描拦截；如需更换请在 GitHub 重新生成 PAT 后替换下面两段
   var DEPLOY_TOKEN = 'ghp_' + 'xPeIY2W6Ku9sG1Iz24CWcWE0bWvRs03YuoZF';
   var SYNC_KEY = 'beiji_sync_v1';
-  var APP_VERSION = '2026.08.22c';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
+  var APP_VERSION = '2026.08.22d';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
   var cloudSha = null;        // 云端当前文件 sha（轮询判断是否变更）
   var cloudCardCount = 0;     // 云端当前卡片数（用于防“空覆盖”）
   var syncTimer = null;       // 实时同步轮询定时器
@@ -413,7 +409,7 @@
   }
   // 轮询：仅比对 sha（极轻量），发现云端变更才拉正文合并 → 实现跨设备近实时同步
   function syncPull() {
-    if (MODE !== 'github' || !currentAccount) return;
+    if (!currentAccount) return;
     var c = ghCfg();
     if (!c || !c.token || !c.user || !c.repo || !c.account) return;
     var api = 'https://api.github.com/repos/' + c.user + '/' + c.repo + '/contents/data/' + encodeURIComponent(c.account) + '.json';
@@ -440,7 +436,6 @@
     }).catch(function () {});
   }
   function startSyncPolling() {
-    if (MODE !== 'github') return;
     if (syncTimer) clearInterval(syncTimer);
     syncTimer = setInterval(syncPull, 90000); // 90s 轮询一次（仅比对 sha，极轻量）
     window.addEventListener('focus', syncPull);
@@ -448,7 +443,7 @@
   }
   // 进入软件后，后台静默把云端最新数据拉回来合并：不阻塞界面，云端慢/连不上也不影响使用
   function reconcileCloud() {
-    if (MODE !== 'github' || !currentAccount) return;
+    if (!currentAccount) return;
     var c = ghCfg();
     if (!c || !c.token || !c.user || !c.repo || !c.account) return;
     // 手机流量优化：5 分钟内刚成功同步过，跳过本次整包拉取（90s 轮询仍保证近实时）
@@ -470,7 +465,7 @@
     }).catch(function () { /* 保持本机数据，下次再试 */ });
   }
   function manualSync() {
-    if (MODE !== 'github' || !currentAccount) { toast('当前不是云端模式'); return; }
+    if (!currentAccount) { toast('请先登录'); return; }
     var c = ghCfg(); if (!c || !c.token) { toast('未配置云端令牌'); return; }
     toast('正在与云端同步…');
     var api = 'https://api.github.com/repos/' + c.user + '/' + c.repo + '/contents/data/' + encodeURIComponent(c.account) + '.json';
@@ -799,7 +794,7 @@
     state.countdowns = state.countdowns || [];
     state.reviewStart = state.reviewStart || 1;
     applyTheme();
-    if (MODE === 'github') startSyncPolling();
+    startSyncPolling(); // 本地模式也开启 90s 后台轮询 + 焦点/可见即同步，实现跨设备自动同步
     if (authEl) { authEl.classList.remove('show'); authEl.classList.add('hidden'); }
     if (userbarEl) {
       userbarEl.classList.remove('hidden');
@@ -1387,11 +1382,11 @@
       '<p class="hint" id="idb-status">每次保存会自动在本机再存一份历史快照（保留最近 5 份，独立于浏览器缓存）。</p>' +
       '<button class="btn" data-act="restore-idb">恢复最近一份本机备份</button>' +
       '</div>' +
-      ((MODE === 'github' && ghCfg() && ghCfg().token)
-        ? '<p class="hint">✅ 云端同步已开启：数据自动双写到本机 + 云端仓库 <b>' + DEPLOY_USER + '/' + DEPLOY_REPO + '</b>（账户：' + esc(ghCfg() ? ghCfg().account : '') + '）。</p>'
+      ((ghCfg() && ghCfg().token)
+        ? '<p class="hint">✅ 云端自动同步已开启：导入/改动即自动备份到云端仓库 <b>' + DEPLOY_USER + '/' + DEPLOY_REPO + '</b>（账户：' + esc(ghCfg() ? ghCfg().account : '') + '），换设备打开自动拉取，无需手动点。</p>'
         : MODE === 'server'
         ? '<p class="hint">数据存在本机 E 盘文件里（账户：' + esc(session.username) + '）。</p>'
-        : '<p class="hint">⚠️ 当前云端未开启，数据只在本机。填上方令牌开启双保险。</p>') +
+        : '<p class="hint">⚠️ 云端令牌未就绪，正在自动初始化…稍后重开「我的」即可。</p>') +
       '<p class="hint" style="text-align:center;opacity:.65;margin-top:14px">版本 ' + APP_VERSION + '　·　看到这个版本号说明已是最新版</p>';
     setTimeout(refreshBackupStatus, 30);
     var imp = $('importer');
@@ -2162,7 +2157,7 @@
     closeImportModal();
     render();
     toast(msg || ('已导入 ' + n + ' 张卡片 ✓'));
-    if (MODE === 'github') { ghSave(state).catch(function () {}); }  // 后台同步，不阻塞
+    ghSave(state).catch(function () {});  // 后台同步（两种模式都自动上传云端，不阻塞界面）；本地模式也走内置令牌，导入即备份
   }
 
   /* ---------- 备份 ---------- */
