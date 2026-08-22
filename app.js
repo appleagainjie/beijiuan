@@ -372,7 +372,7 @@
   // 部署令牌（自用仓库专用）：以拼接方式存放，避免被公开仓库的密钥扫描拦截；如需更换请在 GitHub 重新生成 PAT 后替换下面两段
   var DEPLOY_TOKEN = 'ghp_' + 'xPeIY2W6Ku9sG1Iz24CWcWE0bWvRs03YuoZF';
   var SYNC_KEY = 'beiji_sync_v1';
-  var APP_VERSION = '2026.08.22e';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
+  var APP_VERSION = '2026.08.22f';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
   var cloudSha = null;        // 云端当前文件 sha（轮询判断是否变更）
   var cloudCardCount = 0;     // 云端当前卡片数（用于防“空覆盖”）
   var syncTimer = null;       // 实时同步轮询定时器
@@ -1022,14 +1022,18 @@
 
   // 复习/模考共用的卡片渲染：挖空卡渲染 N 个输入框，显示答案后回填正确答案
   function flipCard(card, revealed) {
-    if (card.cloze && card.points && card.points.length) {
-      var inputs = card.points.map(function (p, i) {
-        return '<div class="cl"><span class="cn">' + circled(i + 1) + '</span>' +
-          '<input class="clin" value="' + (revealed ? esc(p) : '') + '" placeholder="回想第 ' + (i + 1) + ' 点…" ' + (revealed ? 'readonly' : '') + '></div>';
-      }).join('');
+    if (card.cloze) {
+      // 未揭示：紧凑显示「标题 + ①②③… 几个要点编号」，不再铺开每个输入框（要点多也能一屏看完）
+      if (!revealed) {
+        var pts = card.points || [];
+        var chips = pts.slice(0, 8).map(function (p, i) { return '<span class="cn">' + circled(i + 1) + '</span>'; }).join('');
+        var tail = pts.length > 8 ? ' …（共 ' + pts.length + ' 个要点）' : (pts.length ? '' : '（点「显示答案」核对）');
+        return '<div class="card flip"><div class="q">' + esc(card.q) + '</div>' +
+          '<div class="cloze-compact">📝 要点：' + chips + tail + '</div></div>';
+      }
+      // 揭示后：完整答案，并把“大点/小点”标题行加粗，显著标明层级
       return '<div class="card flip"><div class="q">' + esc(card.q) + '</div>' +
-        '<div class="cloze">' + inputs + '</div>' +
-        (revealed ? '<div class="a">' + esc(card.a || '') + '</div>' : '') + '</div>';
+        '<div class="a">' + renderClozeAnswer(card.a || '') + '</div></div>';
     }
     return '<div class="card flip"><div class="q">' + esc(card.q) + '</div>' +
       (revealed ? '<div class="a">' + esc(card.a || '(无答案)') + '</div>' : '') + '</div>';
@@ -2013,28 +2017,76 @@
     }
     return '';
   }
-  function makeCloze(heading, pts) {
-    var h = heading ? heading + '\n' : '';
-    var q = h + '（共 ' + pts.length + ' 个要点，先自己默写，再点「显示答案」核对）';
-    var a = h + pts.map(function (p, idx) { return circled(idx + 1) + p; }).join('');
-    return { q: q, a: a, cloze: true, points: pts };
+  // 段首项目符号：含 docx 私有区字形(\uF0B7/\uF0A5) 与常见 •·▪-–—
+  var BULLET_RE = /^[\uF0A7\uF0B7\uF0A5•·▪\-–—\s]+/;
+  function stripBullet(s) { return (s || '').replace(BULLET_RE, ''); }
+  // 从整节正文里抽取“小点”（①②③ 与 （n）），用于复习页紧凑计数与填空核对
+  function extractSmallPoints(body) {
+    var pts = [], m, re = /[①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳]/g;
+    while ((m = re.exec(body || '')) !== null) pts.push(m[0]);
+    var re2 = /（(\d+)）/g;
+    while ((m = re2.exec(body || '')) !== null) pts.push('（' + m[1] + '）');
+    return pts;
+  }
+  // 揭示答案时，把“大点/小点”标题行加粗，显著标明层级
+  function renderClozeAnswer(a) {
+    return (a || '').split('\n').map(function (line) {
+      var e = esc(line);
+      if (/^[（(][一二三四五六七八九十\d]+[)）]/.test(line) || /^\d+[\.．、]/.test(line)) {
+        return '<div class="bp">' + e + '</div>';
+      }
+      return '<div>' + e + '</div>';
+    }).join('');
+  }
+  function makeCloze(heading, body) {
+    var h = heading ? heading : '';
+    var b = body ? body : '';
+    var pts = extractSmallPoints(b);
+    if (pts.length >= 2) return { q: h + '\n（共 ' + pts.length + ' 个要点：先默写，再点「显示答案」核对）', a: (h ? h + '\n' : '') + b, cloze: true, points: pts };
+    return { q: h, a: (h ? h + '\n' : '') + b, cloze: true, points: pts };
   }
   function parseCloze(text) {
-    // 去掉段落开头的项目符号字形，按空行/换行切段
-    var paras = text.replace(/\r/g, '').split(/\n+/).map(function (s) {
-      return s.replace(/^[•·▪\-–—\s]+/, '').trim();
-    }).filter(Boolean);
+    // 去段首项目符号、按换行切段、去空行（全程保留 ①②③、（一）、数字序号等正文，不删任何内容）
+    var paras = (text || '').replace(/\r/g, '').split(String.fromCharCode(10))
+      .map(function (s) { return stripBullet(s).trim(); }).filter(Boolean);
+    function isL1(p) {
+      return /^[一二三四五六七八九十]+[、．.]/.test(p) || /^第[一二三四五六七八九十]+篇[、．.]/.test(p);
+    }
     var items = [];
+    var pre = [], title = null, buf = [], pendingChapter = null;
+    function flush() {
+      if (title === null && buf.length === 0) return;
+      var body = buf.join('\n');
+      var t = title !== null ? title : (buf[0] || '');
+      var bb = title !== null ? body : buf.slice(1).join('\n');
+      if (pendingChapter && t !== pendingChapter) { bb = pendingChapter + '\n' + bb; pendingChapter = null; }
+      if (bb.trim()) items.push(makeCloze(t, bb));
+      else if (/^第.+篇/.test(t)) pendingChapter = t;   // 空章：暂存标题，并入下一段，保证不丢
+      else items.push(makeCloze(t, t));                 // 其他空节：标题即内容，保证不丢
+    }
     for (var i = 0; i < paras.length; i++) {
-      var line = paras[i];
-      var pts = countPoints(line);
-      if (pts.length < 2) pts = extractKeySegments(line).length ? extractKeySegments(line) : [];
-      if (pts.length >= 2) {
-        items.push(makeCloze(findHeading(paras, i), pts));
-      } else if (pts.length === 1) {
-        // 单行单要点：若附近有标题，也成一张卡
-        var hd = findHeading(paras, i);
-        if (hd) items.push(makeCloze(hd, pts));
+      if (isL1(paras[i])) {
+        if (title === null && buf.length === 0) { buf = pre.concat(buf); pre = []; } // 首个一级标题前的前言并入本节
+        flush();
+        title = paras[i]; buf = [];
+      } else {
+        if (title === null) pre.push(paras[i]); else buf.push(paras[i]);
+      }
+    }
+    flush();
+    if (pendingChapter) items.push(makeCloze(pendingChapter, pendingChapter));
+    // 兜底：没有任何一级标题时，退回“带序号/高亮的行即要点”的旧逻辑（兼容帽子题等）
+    if (!items.length) {
+      for (var k = 0; k < paras.length; k++) {
+        var line = paras[k];
+        var pts = countPoints(line);
+        if (pts.length < 2) pts = extractKeySegments(line).length ? extractKeySegments(line) : [];
+        if (pts.length >= 2) {
+          items.push(makeCloze(findHeading(paras, k), pts.map(function (p, idx) { return circled(idx + 1) + p; }).join('')));
+        } else if (pts.length === 1) {
+          var hd = findHeading(paras, k);
+          if (hd) items.push(makeCloze(hd, pts.map(function (p, idx) { return circled(idx + 1) + p; }).join('')));
+        }
       }
     }
     return items;
@@ -2051,6 +2103,8 @@
     if (/问[：:]/.test(text)) qa += 1;
     if (/^#{1,6}\s/m.test(text)) know += 3;
     if (/^([一二三四五六七八九十]+)[、．.]\s*\S+$/m.test(text)) know += 2;
+    if (/^[一二三四五六七八九十]+[、．.]/.test(text)) cloze += 2;   // 含一级大标题(一、二、)的大纲文档也走挖空（层级解析、零删除）
+    if (/^第[一二三四五六七八九十]+篇[、．.]/.test(text)) cloze += 2;
     if (cloze >= 3) return 'cloze';
     return qa >= know ? 'qa' : 'knowledge';
   }
