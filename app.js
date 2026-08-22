@@ -168,6 +168,8 @@
     }).then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { j._status = r.status; return j; }); });
   }
   function saveData(d) {
+    // 所有保存都带时间戳，作为多设备冲突/删除判断依据
+    d._savedAt = Date.now();
     if (MODE === 'server') {
       return api('POST', '/api/data', { token: session.token, data: d }).then(function (j) {
         if (j._status === 401) { toast('登录已失效，请重新登录'); doLogout(); }
@@ -175,10 +177,8 @@
       });
     }
     // 统一只序列化一次，避免大文件重复 stringify
-    var json = '';
-    try { json = JSON.stringify(d); } catch (e) {}
+    var json = JSON.stringify(d);
     if (MODE === 'github') {
-      d._savedAt = Date.now();
       var j2 = JSON.stringify(d);
       // 本机始终尝试存完整数据：localStorage 配额约 5MB，当前数据 3MB 完全够存。
       // 旧逻辑在 >800KB 时只存 _meta 标记，导致清缓存/换设备后本机无任何完整数据 → 数据丢失。
@@ -248,6 +248,8 @@
     // 直接覆盖会把云端已有卡片冲掉。此时先拉云端合并（本地按 id 优先），再写回。
     var baseData = d;
     function prepare() {
+      // 本地数据已有保存时间戳，直接以本地为准，避免删除/修改被云端旧数据覆盖
+      if (baseData._savedAt) return Promise.resolve(baseData);
       if (cloudCardCount > 0 && (baseData.cards || []).length < cloudCardCount) {
         return fetch(rawUrl, { cache: 'no-store' }).then(function (r) { return r.ok ? r.text() : null; }).then(function (txt) {
           if (!txt) return baseData;
@@ -277,7 +279,16 @@
         return fetch(api, { method: 'PUT', headers: headers, 'Content-Type': 'application/json', signal: ctrl ? ctrl.signal : undefined, body: JSON.stringify(body) });
       }
       return getSha().then(function (sha) { return put(sha); }).then(function (r) {
-        if (!r.ok) return r.text().then(function (t) { throw new Error('HTTP ' + r.status + ' ' + t.slice(0, 100)); });
+        if (!r.ok) {
+          if (r.status === 409) {
+            // sha 冲突：重新取最新 sha 再试一次（多标签/多设备同时写入）
+            return getSha().then(function (sha2) { return put(sha2); }).then(function (r2) {
+              if (!r2.ok) return r2.text().then(function (t) { throw new Error('HTTP ' + r2.status + ' ' + t.slice(0, 100)); });
+              return r2.json();
+            });
+          }
+          return r.text().then(function (t) { throw new Error('HTTP ' + r.status + ' ' + t.slice(0, 100)); });
+        }
         return r.json().then(function (j) { return j; });
       }, function (e) { clearT(); throw e; }).then(function (res) { clearT(); return res; });
     }
@@ -372,7 +383,7 @@
   // 部署令牌（自用仓库专用）：以拼接方式存放，避免被公开仓库的密钥扫描拦截；如需更换请在 GitHub 重新生成 PAT 后替换下面两段
   var DEPLOY_TOKEN = 'ghp_' + 'xPeIY2W6Ku9sG1Iz24CWcWE0bWvRs03YuoZF';
   var SYNC_KEY = 'beiji_sync_v1';
-  var APP_VERSION = '2026.08.22f';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
+  var APP_VERSION = '2026.08.22g';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
   var cloudSha = null;        // 云端当前文件 sha（轮询判断是否变更）
   var cloudCardCount = 0;     // 云端当前卡片数（用于防“空覆盖”）
   var syncTimer = null;       // 实时同步轮询定时器
@@ -393,6 +404,18 @@
   // 把云端卡片合并进当前 state（按 id；以“更新时间”较新者为准，避免互相覆盖）
   function mergeCloudIntoState(cloud) {
     if (!cloud || !cloud.cards) return;
+    var cT = cloud._savedAt || 0;
+    var lT = state._savedAt || 0;
+    if (cT > lT + 1000) {
+      // 云端更新，整包替换（支持删除同步）
+      var keys = Object.keys(cloud);
+      for (var i = 0; i < keys.length; i++) { state[keys[i]] = cloud[keys[i]]; }
+      return;
+    }
+    if (lT > 0 && lT >= cT) {
+      // 本地更新，云端旧了，不应把云端旧卡片加回来
+      return;
+    }
     var map = {};
     state.cards.forEach(function (c) { map[c.id] = c; });
     cloud.cards.forEach(function (cc) {
