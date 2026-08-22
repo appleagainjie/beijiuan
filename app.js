@@ -383,7 +383,7 @@
   // 部署令牌（自用仓库专用）：以拼接方式存放，避免被公开仓库的密钥扫描拦截；如需更换请在 GitHub 重新生成 PAT 后替换下面两段
   var DEPLOY_TOKEN = 'ghp_' + 'xPeIY2W6Ku9sG1Iz24CWcWE0bWvRs03YuoZF';
   var SYNC_KEY = 'beiji_sync_v1';
-  var APP_VERSION = '2026.08.22j';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
+  var APP_VERSION = '2026.08.22k';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
   var cloudSha = null;        // 云端当前文件 sha（轮询判断是否变更）
   var cloudCardCount = 0;     // 云端当前卡片数（用于防“空覆盖”）
   var syncTimer = null;       // 实时同步轮询定时器
@@ -2073,19 +2073,10 @@
   // 把一段“子点正文”按命名子概念（（1）/ 1）等）拆成若干子卡；
   // ① 圆点序号一律视为内容细节，不拆卡。返回 null 表示无需拆分。
   function splitBodyIntoSubconcepts(body) {
-    if (!body || body.trim().length < 6) return null;
-    var re = /[（(]?\d+[）)]/g, ms = [], m;
-    while ((m = re.exec(body)) !== null) ms.push({ idx: m.index, end: m.index + m[0].length, full: m[0] });
-    if (ms.length < 2) return null;
-    var segs = [];
-    for (var k = 0; k < ms.length; k++) {
-      var start = ms[k].end;
-      var end = (k + 1 < ms.length) ? ms[k + 1].idx : body.length;
-      var seg = stripBullet(body.slice(start, end)).replace(/^[\s：:、，,]+/, '').trim();
-      if (seg) segs.push({ marker: ms[k].full, text: seg });
-    }
-    if (segs.length < 2) return null;
-    return segs;
+    // 用户反馈：body 里的（1）（2）是同一道题的多个答案点，不要再拆成多张卡，
+    // 否则会把“（2）...”截断成题干，导致答案泄露，且“（1）”部分容易丢失。
+    // 现在统一：子点成卡，body 原样作为答案（里面的 ①②③ 仍由 extractSmallPoints 抽出作要点提示）。
+    return null;
   }
   // 标题原样保留：用户明确要求“任何内容不能少”，故不再删除标题里的考试标注括号
   // （如 （26简答）/（15名解）/（一般不会考）/（考到的概率很小）/（GDP）/（概念、原则） 等）
