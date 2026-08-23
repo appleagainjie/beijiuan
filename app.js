@@ -95,7 +95,7 @@
 
   /* ---------- 工具 ---------- */
   function emptyState() {
-    return { cards: [], checkins: [], theme: 'mint-rabbit', ai: { url: '', key: '', model: 'gpt-4o-mini' }, bookOrder: [], reviewOrder: 'seq', dailyGoal: { review: 0, exam: 0 }, countdowns: [], reviewStart: 1 };
+    return { cards: [], checkins: [], deletedIds: [], theme: 'mint-rabbit', ai: { url: '', key: '', model: 'gpt-4o-mini' }, bookOrder: [], reviewOrder: 'seq', dailyGoal: { review: 0, exam: 0 }, countdowns: [], reviewStart: 1 };
   }
   function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
   function pad(n) { return n < 10 ? '0' + n : '' + n; }
@@ -219,7 +219,7 @@
         // 不再用“谁时间戳新谁覆盖”，避免本地较新时把云端其他设备的卡片丢掉。
         if (cloud && (cloud.cards || []).length) {
           var u = unionCards(localCache, cloud);
-          var merged = Object.assign({}, localCache, { cards: u.cards, checkins: u.checkins });
+          var merged = Object.assign({}, localCache, { cards: u.cards, checkins: u.checkins, deletedIds: u.deletedIds });
           if (cloud._savedAt) merged._savedAt = Math.max(localCache._savedAt || 0, cloud._savedAt);
           return merged;
         }
@@ -264,7 +264,7 @@
             try {
               var cloud = JSON.parse(txt);
               var u = unionCards(baseData, cloud);
-              baseData = Object.assign({}, baseData, { cards: u.cards, checkins: u.checkins });
+              baseData = Object.assign({}, baseData, { cards: u.cards, checkins: u.checkins, deletedIds: u.deletedIds });
               baseData.syncLog = mergeSyncLog(baseData.syncLog, cloud.syncLog);  // 备份/同步记录也按并集累积，不丢历史
               cloudSha = meta.sha;
             } catch (e) {}
@@ -397,7 +397,7 @@
   // 从而“电脑/手机自动同步”真正生效（旧逻辑按各自登录手机号分文件，导致各设备数据互相看不见）。
   var SYNC_ACCOUNT = 'shared';
   var SYNC_KEY = 'beiji_sync_v1';
-  var APP_VERSION = '2026.08.23q';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
+  var APP_VERSION = '2026.08.23r';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
   var cloudSha = null;        // 云端当前文件 sha（轮询判断是否变更）
   var cloudCardCount = 0;     // 云端当前卡片数（用于防“空覆盖”）
   var syncTimer = null;       // 实时同步轮询定时器
@@ -418,14 +418,18 @@
     } catch (e) {}
   }
   // 两批卡片按 id 做并集：同 id 取 updatedAt 较新者（仅覆盖“同一张卡”的旧版本）；不同 id 一律保留。
-  // 绝不按“内容相同”删除任何卡片（用户明确要求：不要删除任何记录，以防万一全部失效）。
-  // 这是多设备同步“只增不丢、最终收敛到全集”的核心。
+  // 删除通过「删除标记 deletedIds」跨设备传播：任一方标记删除的卡片，合并时一律剔除，
+  // 从而保证“删除也能同步到最新”（电脑删了某本书，手机/其他设备再登录也看不到）。
+  // 这是多设备同步“最终收敛到全集（已删除项除外）”的核心。
   function unionCards(a, b) { return unionCardsImpl(a, b); }
   function unionCardsImpl(a, b) {
     var list = [], byId = {}, pos = {};
+    var del = {}, dl = (a.deletedIds || []).concat(b.deletedIds || []);
+    dl.forEach(function (id) { if (id) del[id] = true; });
     function add(c) {
       c = normalizeCard(c);
       var id = c.id;
+      if (del[id]) return;   // 被任一方删除的卡片，合并时剔除（删除可跨设备同步）
       if (byId[id]) {
         var ex = byId[id];
         var lt = ex.updatedAt || ex.lastReview || ex.created || 0;
@@ -439,7 +443,7 @@
     (b.cards || []).forEach(add);
     var checkins = [], cs = {};
     (a.checkins || []).concat(b.checkins || []).forEach(function (d) { if (!cs[d]) { cs[d] = 1; checkins.push(d); } });
-    return { cards: list, checkins: checkins };
+    return { cards: list, checkins: checkins, deletedIds: Object.keys(del) };
   }
   // 本机设备标识：用于同步记录里标明是哪台设备在备份/同步；可在「我的」页手动改名
   function deviceTag() {
@@ -482,6 +486,7 @@
     var u = unionCards(state, cloud);
     state.cards = u.cards;
     state.checkins = u.checkins;
+    state.deletedIds = u.deletedIds;   // 同步对方标记删除的卡片，使删除也能跨设备生效
     if (cloud._savedAt) state._savedAt = Math.max(state._savedAt || 0, cloud._savedAt);
   }
   // 轮询：仅比对 sha（极轻量），发现云端变更才拉正文合并 → 实现跨设备近实时同步
@@ -552,7 +557,7 @@
     if (MODE === 'server') { toast('服务端模式无需手动同步'); return; }
     toast('正在从云端同步最新数据…');
     // 始终拉取云端最新全集（去掉旧版 sha 门槛）：点「立即同步」一定把云端数据拉到本机，
-    // 与本地做按 id 并集（永不删除任何卡片，只增加/更新），再写回云端并记一笔同步记录。
+    // 与本地做按 id 并集（删除标记同步，已删除项跨设备剔除），再写回云端并记一笔同步记录。
     ghLoad({ silent: true }).then(function (cloud) {
       if (cloud && cloud.cards && cloud.cards.length) {
         var before = state.cards.length;
@@ -931,6 +936,7 @@
     state.dailyGoal = state.dailyGoal || { review: 0, exam: 0 };
     state.countdowns = state.countdowns || [];
     state.reviewStart = state.reviewStart || 1;
+    state.deletedIds = (state.deletedIds || []).slice();
     applyTheme();
     startSyncPolling(); // 本地模式也开启 90s 后台轮询 + 焦点/可见即同步，实现跨设备自动同步
     if (authEl) { authEl.classList.remove('show'); authEl.classList.add('hidden'); }
@@ -1516,7 +1522,7 @@
       '</div>' +
       '<div class="card">' +
       '<div class="lbl">数据备份与同步</div>' +
-      '<p class="hint">✅ 云端自动同步已开启：所有设备共用<b>同一个云端文件</b>，每次保存、导入都自动备份；点「立即同步」会把云端<b>最新</b>数据拉到本机。任何卡片都<b>不会被删除</b>，只会增加或更新，旧的也一直保留（防万一全部失效）。</p>' +
+      '<p class="hint">✅ 云端自动同步已开启：所有设备共用<b>同一个云端文件</b>，每次保存、导入都自动备份；点「立即同步」会把云端<b>最新</b>数据拉到本机。删除也会同步——在任一设备删书/删卡，云端同步清理，其他设备再登录就看不到（已删除项通过删除标记跨设备生效，不会误删未删的卡）。</p>' +
       '<div class="ghbtns">' +
       '<button class="btn" data-act="backup-gh">立即备份到云端</button>' +
       '<button class="btn primary" data-act="sync-now">立即同步（拉取云端最新）</button>' +
@@ -1614,7 +1620,9 @@
       if (!ids.length) { toast('先勾选要删除的卡片'); return; }
       if (!confirm('确定删除选中的 ' + ids.length + ' 张卡片？此操作不可恢复')) return;
       var set = {}; ids.forEach(function (k) { set[k] = true; });
+      var _rmc = state.cards.filter(function (c) { return set[c.id]; });
       state.cards = state.cards.filter(function (c) { return !set[c.id]; });
+      state.deletedIds = (state.deletedIds || []).concat(_rmc.map(function (c) { return c.id; }));  // 记删除标记，云端也清掉，其他设备同步后看不到
       manageSel = {}; save(); toast('已删除 ' + ids.length + ' 张'); render(); return;
     }
     if (act === 'mg-rebook') {
@@ -1815,7 +1823,9 @@
     }
     if (act === 'del-book') {
       if (!confirm('删除《' + arg + '》及其所有卡片？此操作不可恢复')) return;
+      var _rmb = state.cards.filter(function (c) { return c.book === arg; });
       state.cards = state.cards.filter(function (c) { return c.book !== arg; });
+      state.deletedIds = (state.deletedIds || []).concat(_rmb.map(function (c) { return c.id; }));  // 记删除标记，云端也清掉，其他设备同步后看不到
       save(); toast('已删除《' + arg + '》'); render(); return;
     }
     // 书库预览：返回书架 / 从指定位置开始复习这本书
