@@ -392,7 +392,7 @@
   // 从而“电脑/手机自动同步”真正生效（旧逻辑按各自登录手机号分文件，导致各设备数据互相看不见）。
   var SYNC_ACCOUNT = 'shared';
   var SYNC_KEY = 'beiji_sync_v1';
-  var APP_VERSION = '2026.08.22n';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
+  var APP_VERSION = '2026.08.22o';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
   var cloudSha = null;        // 云端当前文件 sha（轮询判断是否变更）
   var cloudCardCount = 0;     // 云端当前卡片数（用于防“空覆盖”）
   var syncTimer = null;       // 实时同步轮询定时器
@@ -693,6 +693,16 @@
     card.updatedAt = now;
     return card;
   }
+  // 把当前卡重插到队列前面（墨墨式短间隔复现）：首次约隔 2 张就再次出现，
+  // 连续答错则间隔逐步拉长；当队列只剩它自己时会一直复现，直到被「认识/精通」才出队
+  // —— 即「直到都背到了，才进行下一轮/新词」。
+  function requeueWrong() {
+    var c = reviewQueue.shift();
+    if (!c) return;
+    c._wrong = (c._wrong || 0) + 1;
+    var pos = Math.min(2 + c._wrong, Math.max(1, reviewQueue.length));
+    reviewQueue.splice(pos, 0, c);
+  }
   function isToday(ts) {
     return !!ts && todayStr() === new Date(ts).toLocaleDateString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' }).replace(/\//g, '-');
   }
@@ -794,15 +804,24 @@
     }
     return a;
   }
-  // 按当前选择的顺序重建复习队列：顺序 / 随机 / 薄弱优先（ef 越低越先）
+  // 重建复习队列：先复习学过的（有历史），再学新的（无历史）；组内按所选方式排序。
+  // 这是墨墨式「先复习旧的、再学新的」的核心：复习卡永远排在新学卡前面。
   function applyReviewOrder() {
     if (!reviewSource || !reviewSource.length) reviewSource = state.cards.slice();
     var mode = state.reviewOrder || 'seq';
-    var q = reviewSource.slice();
-    if (mode === 'random') shuffle(q);
-    else if (mode === 'weak') q.sort(function (a, b) { return ((a.stability || 1) - (b.stability || 1)) || ((a.due || 0) - (b.due || 0)); });
+    var isRev = function (c) { return (c.hist || []).length > 0; };
+    var rev = reviewSource.filter(isRev);
+    var fresh = reviewSource.filter(function (c) { return !isRev(c); });
+    function sortGroup(g) {
+      if (mode === 'random') shuffle(g);
+      else if (mode === 'weak') g.sort(function (a, b) { return ((a.stability || 1) - (b.stability || 1)) || ((a.due || 0) - (b.due || 0)); });
+    }
+    sortGroup(rev); sortGroup(fresh);
+    // 每日目标只限制「新学」数量；复习卡优先全部排入（先巩固旧的，再学新的）
     var goal = (state.dailyGoal && state.dailyGoal.review) || 0;
-    if (goal > 0 && q.length > goal) q = q.slice(0, goal);
+    var q = rev.slice();
+    if (goal > 0 && fresh.length > goal) fresh = fresh.slice(0, goal);
+    q = q.concat(fresh);
     // 起始位置：从「第 N 张」开始复习（在最终队列上循环偏移，便于分段背诵）
     var total = q.length;
     var start = ((state.reviewStart || 1) - 1);
@@ -1152,6 +1171,8 @@
     var card = reviewQueue[0];
     var revealed = !!card._revealed;
     var order = state.reviewOrder || 'seq';
+    var cntRev = reviewQueue.filter(function (c) { return (c.hist || []).length > 0; }).length;
+    var cntNew = reviewQueue.length - cntRev;
     var nextHint = '';
     if (card.lastGrade) {
       var lastTxt = card.lastGrade === 4 ? '上次：精通' : card.lastGrade === 3 ? '上次：认识' : card.lastGrade === 2 ? '上次：模糊' : '上次：忘记';
@@ -1171,7 +1192,7 @@
       '<span>从第</span><input id="rev-start-in" class="num" type="number" min="1" value="' + (state.reviewStart || 1) + '">' +
       '<span>张开始（共 ' + (reviewSource ? reviewSource.length : state.cards.length) + ' 张）</span>' +
       '<button class="btn small" data-act="rev-start">应用</button></div>' +
-      '<div class="prog">待复习 ' + reviewQueue.length + ' 张</div>' +
+      '<div class="prog">待复习 ' + reviewQueue.length + ' 张（复习 ' + cntRev + ' · 新学 ' + cntNew + '）</div>' +
       flipCard(card, revealed) +
       nextHint +
       (revealed
@@ -1724,9 +1745,10 @@
       var rt = card._revealAt ? (Date.now() - card._revealAt) : 0;
       grade(card, q, rt);
       card._revealed = false;
-      if (q === 1) {
-        // 忘记：移到队列末尾，本轮再出现
-        reviewQueue.push(reviewQueue.shift());
+      if (q === 1 || q === 2) {
+        // 忘记/模糊：墨墨式短间隔重插——错的卡在接下来几张内立刻复现，
+        // 间隔随连续错误次数逐步拉长；只有答对才离开本轮（直到背到才下一轮）
+        requeueWrong();
       } else {
         reviewQueue.shift();
         if (reviewQueue.length === 0) reviewQueue = null;
