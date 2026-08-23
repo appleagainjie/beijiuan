@@ -255,22 +255,43 @@
       // 关键修复：每次保存都先拉取云端、与本地做“按 id 并集”后再写回。
       // 旧逻辑直接以本地覆盖云端，导致多设备互相覆盖、卡片只丢不增；
       // 现在云端是所有设备的累积全集，任何一台保存都不会冲掉其他设备的卡片。
+      function readRaw() {
+        return fetch(rawUrl, { cache: 'no-store' })
+          .then(function (r) { return r.ok ? r.text() : Promise.reject(new Error('raw HTTP ' + r.status)); });
+      }
+      function readBlob(sha) {
+        // raw.githubusercontent.com 在国内可能被重置；用 git/blobs API 兜底，该接口经 api.github.com，更稳定
+        var blobApi = 'https://api.github.com/repos/' + c.user + '/' + c.repo + '/git/blobs/' + sha;
+        return fetch(blobApi, { headers: headers })
+          .then(function (r) { return r.ok ? r.json() : Promise.reject(new Error('blob HTTP ' + r.status)); })
+          .then(function (b) {
+            if (!b || !b.content) return Promise.reject(new Error('blob empty'));
+            var bin = atob(b.content), bytes = new Uint8Array(bin.length);
+            for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+            return new TextDecoder().decode(bytes);
+          });
+      }
+      function mergeCloud(txt) {
+        if (!txt) return Promise.reject(new Error('cloud text empty'));
+        var cloud = JSON.parse(txt);
+        var u = unionCards(baseData, cloud);
+        baseData = Object.assign({}, baseData, { cards: u.cards, checkins: u.checkins, deletedIds: u.deletedIds });
+        baseData.syncLog = mergeSyncLog(baseData.syncLog, cloud.syncLog);  // 备份/同步记录也按并集累积，不丢历史
+        return baseData;
+      }
       return fetch(api, { headers: headers, cache: 'no-store' })
-        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (r) { return r.ok ? r.json() : Promise.reject(new Error('meta HTTP ' + r.status)); })
         .then(function (meta) {
           if (!meta || meta.notFound || !meta.sha) return baseData; // 云端尚无文件 → 直接写本地
-          return fetch(rawUrl, { cache: 'no-store' }).then(function (r) { return r.ok ? r.text() : null; }).then(function (txt) {
-            if (!txt) return baseData;
-            try {
-              var cloud = JSON.parse(txt);
-              var u = unionCards(baseData, cloud);
-              baseData = Object.assign({}, baseData, { cards: u.cards, checkins: u.checkins, deletedIds: u.deletedIds });
-              baseData.syncLog = mergeSyncLog(baseData.syncLog, cloud.syncLog);  // 备份/同步记录也按并集累积，不丢历史
-              cloudSha = meta.sha;
-            } catch (e) {}
-            return baseData;
+          cloudSha = meta.sha;
+          return readRaw().then(mergeCloud).catch(function (e) {
+            // raw 失败时回退到 blob API，避免网络问题导致读取为空而覆盖云端
+            return readBlob(meta.sha).then(mergeCloud);
           });
-        }).catch(function () { return baseData; });
+        }).catch(function (e) {
+          // 拉取云端失败：绝不能直接用本地覆盖，否则多设备数据会丢
+          return Promise.reject(new Error('读取云端失败，本次暂停上传：' + (e && e.message || '')));
+        });
     }
     function attempt(content, timeoutMs) {
       var ctrl = ('AbortController' in window) ? new AbortController() : null;
@@ -397,7 +418,7 @@
   // 从而“电脑/手机自动同步”真正生效（旧逻辑按各自登录手机号分文件，导致各设备数据互相看不见）。
   var SYNC_ACCOUNT = 'shared';
   var SYNC_KEY = 'beiji_sync_v1';
-  var APP_VERSION = '2026.08.23s';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
+  var APP_VERSION = '2026.08.24t';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
   var cloudSha = null;        // 云端当前文件 sha（轮询判断是否变更）
   var cloudCardCount = 0;     // 云端当前卡片数（用于防“空覆盖”）
   var syncTimer = null;       // 实时同步轮询定时器
