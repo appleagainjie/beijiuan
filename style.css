@@ -11,7 +11,7 @@ body{
 }
 
 /* 默认主题变量（会被下面具体主题覆盖） */
-:root{--bg:#e9f8f1;--surface:#fff;--primary:#2fc79b;--text:#173a30;--muted:#6f9a8c;--border:#d6efe7;--line:#d6efe7;--accent:#7fd1c0;}
+:root{--bg:#e9f8f1;--surface:#fff;--primary:#2fc79b;--text:#173a30;--muted:#6f9a8c;--border:#d6efe7;--line:#d6efe7;--accent:#7fd1c0;--input-bg:#fafdfc;}
 
 /* 10 套主题 */
 .theme-mint-rabbit{--bg:#e9f8f1;--surface:#fff;--primary:#2fc79b;--text:#173a30;--muted:#6f9a8c;--border:#d6efe7;--line:#d6efe7;--accent:#7fd1c0;}
@@ -21,9 +21,19 @@ body{
 .theme-bear{--bg:#f1e9e4;--surface:#fffaf7;--primary:#8a5a3c;--text:#3a2418;--muted:#a98a76;--border:#e7d8cf;--line:#e7d8cf;--accent:#c08a5a;}
 .theme-mint{--bg:#e6f7f4;--surface:#fff;--primary:#21b5a6;--text:#143b37;--muted:#66968e;--border:#dceeea;--line:#dceeea;--accent:#6fd0c4;}
 .theme-orange{--bg:#fff1e6;--surface:#fffaf6;--primary:#ff8a3d;--text:#4a2a13;--muted:#b07a55;--border:#ffe0cc;--line:#ffe0cc;--accent:#ffb070;}
-.theme-sky{--bg:#e6f4fb;--surface:#fff;--primary:#2fa8d8;--text:#143a4a;--muted:#6b94a3;--border:#d3eaf4;--line:#d3eaf4;--accent:#7fcdec;}
+.theme-sky{--bg:#e9f8fd;--surface:#ffffff;--primary:#19b6d8;--text:#163b47;--muted:#6aa6b4;--border:#cdeef6;--line:#cdeef6;--accent:#74d6ea;--input-bg:#f4fbfe;}
 .theme-matcha{--bg:#eef5e6;--surface:#fffef9;--primary:#7fae3e;--text:#2f3a18;--muted:#85946a;--border:#e0ecd2;--line:#e0ecd2;--accent:#a9cf6a;}
-.theme-jasmine{--bg:#fbf7ef;--surface:#fff;--primary:#d9b44a;--text:#3d3520;--muted:#a99e7d;--border:#efe7d4;--line:#efe7d4;--accent:#e9d27a;}
+.theme-jasmine{--bg:#f2f8ec;--surface:#ffffff;--primary:#83b657;--text:#32402a;--muted:#8a9a7c;--border:#e3ecd8;--line:#e3ecd8;--accent:#e7c656;--input-bg:#f7fbef;}
+
+/* —— 新增角色主题 & 模式主题 —— */
+/* 玉桂狗：白云 + 天空蓝 + 柔粉，软乎乎治愈系 */
+.theme-cinnamoroll{--bg:#eef6fb;--surface:#ffffff;--primary:#79c2e8;--text:#2a3a47;--muted:#7f97a6;--border:#d9ebf5;--line:#d9ebf5;--accent:#ffc2d4;--input-bg:#f6fafe;}
+/* 库洛米：暗黑粉紫，叛逆少女风（暗色） */
+.theme-kuromi{--bg:#241a2e;--surface:#33263f;--primary:#ff7ab8;--text:#f6eef6;--muted:#b9a6c4;--border:#46354f;--line:#46354f;--accent:#c89bff;--input-bg:#2c2138;background-image:none;}
+/* 夜间模式：深蓝黑，护眼低亮通用暗色 */
+.theme-night{--bg:#161a23;--surface:#1f2530;--primary:#5aa9e6;--text:#e7edf5;--muted:#8a97a8;--border:#2c3441;--line:#2c3441;--accent:#3f6f9e;--input-bg:#232b38;background-image:none;}
+/* 护眼模式：柔绿低蓝光，长时间背诵不刺眼（浅色） */
+.theme-eye{--bg:#d9e7d2;--surface:#eef4ea;--primary:#5e9e54;--text:#32402c;--muted:#7d8a72;--border:#cfe0c6;--line:#cfe0c6;--accent:#9cc77f;--input-bg:#f1f6ed;}
 
 /* 顶栏 */
 #topbar{display:flex;align-items:baseline;gap:8px;padding:calc(env(safe-area-inset-top) + 12px) 16px 10px;background:var(--surface);border-bottom:1px solid var(--border);}
@@ -34,7 +44,7 @@ body{
 #view{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:14px 14px calc(env(safe-area-inset-bottom) + 14px);}
 .card{background:var(--surface);border-radius:16px;padding:16px;margin-bottom:14px;box-shadow:0 2px 10px rgba(0,0,0,.04);}
 .lbl{display:block;font-size:13px;color:var(--muted);margin:10px 0 6px;}
-.inp{width:100%;border:1px solid var(--border);border-radius:12px;padding:12px;font-size:15px;background:#fafdfc;color:var(--text);font-family:inherit;}
+.inp{width:100%;border:1px solid var(--border);border-radius:12px;padding:12px;font-size:15px;background:var(--input-bg,#fafdfc);color:var(--text);font-family:inherit;}
 .area{min-height:84px;resize:vertical;}
 .btn{display:block;width:100%;border:none;border-radius:12px;padding:13px;font-size:15px;font-weight:600;background:var(--accent);color:#fff;margin-top:10px;cursor:pointer;font-family:inherit;}
 .btn.primary{background:var(--primary);}
@@ -71,6 +81,14 @@ body{
 .stats{display:flex;justify-content:space-around;text-align:center;}
 .stats b{display:block;font-size:22px;color:var(--primary);}
 .stats span{font-size:12px;color:var(--muted);}
+
+/* 书库：每本书背诵进度（仅「精通」计入完成） */
+.bookprog{margin-top:8px;}
+.bpbar{height:7px;border-radius:7px;background:var(--border);overflow:hidden;}
+.bpfill{height:100%;border-radius:7px;background:var(--primary);transition:width .3s;}
+.bptxt{font-size:11px;color:var(--muted);margin-top:4px;line-height:1.5;}
+.bptxt b{color:var(--primary);}
+.bp-done .bpfill{background:var(--accent);}
 
 /* 底部标签栏 */
 #tabbar{display:flex;background:var(--surface);border-top:1px solid var(--border);padding-bottom:env(safe-area-inset-bottom);}
