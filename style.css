@@ -282,3 +282,24 @@ body{
 .prevq{font-size:14px;font-weight:600;color:var(--text);line-height:1.45;}
 .preva{font-size:13px;color:var(--muted);margin-top:3px;line-height:1.5;white-space:pre-wrap;}
 .cdrow .btn{margin:0;flex:none;}
+
+/* 复习范围切换栏 */
+.scopebar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:8px 10px;margin-bottom:12px;}
+.scopebar .rolbl{font-size:13px;color:var(--muted);margin-right:2px;}
+.scopebar .smallsell{margin-left:4px;min-width:120px;}
+
+/* 选卡预览弹窗 */
+.modal-mask{position:fixed;inset:0;background:rgba(20,40,34,.45);display:none;align-items:center;justify-content:center;z-index:50;padding:14px;}
+.modal-mask.show{display:flex;}
+.modal{width:min(560px,100%);max-height:86dvh;overflow:auto;background:var(--surface);border-radius:18px;padding:16px;box-shadow:0 12px 40px rgba(0,0,0,.25);}
+.modal .lbl{font-size:14px;font-weight:700;color:var(--text);margin-bottom:10px;}
+.pkbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px;}
+.pkbar .inp{flex:1;min-width:140px;}
+.pkbar .num{width:64px;}
+.picklist{max-height:42dvh;overflow:auto;border:1px solid var(--border);border-radius:12px;padding:6px 8px;background:var(--input-bg);}
+.pickrow{display:flex;align-items:flex-start;gap:8px;padding:7px 6px;border-bottom:1px solid var(--border);font-size:13.5px;line-height:1.45;}
+.pickrow:last-child{border-bottom:none;}
+.pickrow input[type=checkbox]{width:20px;height:20px;accent-color:var(--primary);flex:none;margin-top:2px;}
+.pickrow .pq{color:var(--text);word-break:break-word;}
+.pkfoot{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:12px;flex-wrap:wrap;}
+.pkfoot .hint{margin:0;}
