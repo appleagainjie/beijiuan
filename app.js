@@ -397,7 +397,7 @@
   // 从而“电脑/手机自动同步”真正生效（旧逻辑按各自登录手机号分文件，导致各设备数据互相看不见）。
   var SYNC_ACCOUNT = 'shared';
   var SYNC_KEY = 'beiji_sync_v1';
-  var APP_VERSION = '2026.08.23p';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
+  var APP_VERSION = '2026.08.23q';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
   var cloudSha = null;        // 云端当前文件 sha（轮询判断是否变更）
   var cloudCardCount = 0;     // 云端当前卡片数（用于防“空覆盖”）
   var syncTimer = null;       // 实时同步轮询定时器
@@ -1304,14 +1304,23 @@
   }
 
   // 每本书背诵进度：仅「精通」(lastGrade===4) 计入完成；复习/熟悉都不算，全部精通才=背完
+  // 熟悉度分档：精通=绿(背完) 认识=蓝 模糊=黄 忘记=红 未背=灰
+  function tierOf(c) {
+    var g = c.lastGrade || 0;
+    if (g === 4) return 'master';
+    if (g === 3) return 'know';
+    if (g === 2) return 'fuzzy';
+    if (g === 1) return 'forget';
+    return 'none';
+  }
   function bookProgress(book) {
     var cards = state.cards.filter(function (c) { return c.book === book; });
     var total = cards.length;
-    var mastered = 0;
-    cards.forEach(function (c) { if ((c.lastGrade || 0) === 4) mastered++; });
-    var remaining = total - mastered;
-    var pct = total ? Math.round(mastered / total * 100) : 0;
-    return { total: total, mastered: mastered, remaining: remaining, pct: pct };
+    var t = { master: 0, know: 0, fuzzy: 0, forget: 0, none: 0 };
+    cards.forEach(function (c) { t[tierOf(c)]++; });
+    // 背完率：仅「精通」算背完（全精通=全绿=100%）
+    var pct = total ? Math.round(t.master / total * 100) : 0;
+    return { total: total, t: t, pct: pct };
   }
   function viewLibrary() {
     if (previewBook) { viewLibraryPreview(); return; }
@@ -1324,19 +1333,27 @@
     // 模式一：按书目浏览
     if (libraryMode === 'books') {
       var rows = books.map(function (b) {
-        var p = bookProgress(b);
+        var p = bookProgress(b), t = p.t;
+        var seg = function (cls, n) {
+          if (!n) return '';
+          return '<span class="bseg seg-' + cls + '" style="width:' + (n / p.total * 100) + '%" title="' +
+            ({ master: '精通', know: '认识', fuzzy: '模糊', forget: '忘记', none: '未背' }[cls]) + ' ' + n + ' 张"></span>';
+        };
         var doneCls = p.pct === 100 ? ' bp-done' : '';
         return '<div class="librow"><div style="flex:1">' +
           '<div class="libname">' + esc(b) + ' <span class="cnt">' + p.total + ' 张</span></div>' +
           '<div class="bookprog' + doneCls + '">' +
-          '<div class="bpbar"><div class="bpfill" style="width:' + p.pct + '%"></div></div>' +
-          '<div class="bptxt">精通 <b>' + p.mastered + '</b>/' + p.total + ' · 剩 <b>' + p.remaining + '</b> 张未精通' + (p.pct === 100 ? ' · 🎉全书背完' : '') + '</div>' +
+          '<div class="bkbar">' + seg('master', t.master) + seg('know', t.know) + seg('fuzzy', t.fuzzy) + seg('forget', t.forget) + seg('none', t.none) + '</div>' +
+          '<div class="bptxt">精通 <b>' + t.master + '</b> · 认识 ' + t.know + ' · 模糊 <b class="warn">' + t.fuzzy + '</b> · 忘记 <b class="bad">' + t.forget + '</b> · 未背 ' + t.none +
+          ' ｜ 背完率 <b>' + p.pct + '%</b>' + (p.pct === 100 ? ' 🎉全书背完' : '') + '</div>' +
           '</div></div>' +
           '<div class="libact"><button class="btn small" data-act="review-book" data-arg="' + esc(b) + '">复习</button>' +
           '<button class="btn small ghost" data-act="del-book" data-arg="' + esc(b) + '">删</button></div></div>';
       }).join('');
       viewEl.innerHTML = '<div class="card">' +
-        '<div class="lbl">书架（' + books.length + ' 本 · ' + state.cards.length + ' 张卡 · 仅「精通」计为背完）</div>' + rows +
+        '<div class="lbl">书架（' + books.length + ' 本 · ' + state.cards.length + ' 张卡）</div>' +
+        '<div class="bklegend"><span><i class="dot seg-master"></i>精通(背完)</span><span><i class="dot seg-know"></i>认识</span><span><i class="dot seg-fuzzy"></i>模糊</span><span><i class="dot seg-forget"></i>忘记</span><span><i class="dot seg-none"></i>未背</span></div>' +
+        rows +
         '</div>' +
         '<button class="btn primary" data-act="lib-mode" data-arg="cards">管理卡片（改 / 删 / 批量）</button>';
       return;
