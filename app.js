@@ -95,7 +95,7 @@
 
   /* ---------- 工具 ---------- */
   function emptyState() {
-    return { cards: [], checkins: [], deletedIds: [], theme: 'mint-rabbit', ai: { url: '', key: '', model: 'gpt-4o-mini' }, bookOrder: [], reviewOrder: 'seq', dailyGoal: { review: 0, exam: 0 }, countdowns: [], reviewStart: 1 };
+    return { cards: [], checkins: [], deletedIds: [], theme: 'mint-rabbit', ai: { url: '', key: '', model: 'gpt-4o-mini' }, bookOrder: [], reviewOrder: 'seq', dailyGoal: { review: 0, exam: 0 }, countdowns: [], reviewStart: 1, reviewScope: 'all', reviewBook: '', reviewPickIds: [] };
   }
   function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
   function pad(n) { return n < 10 ? '0' + n : '' + n; }
@@ -397,7 +397,7 @@
   // 从而“电脑/手机自动同步”真正生效（旧逻辑按各自登录手机号分文件，导致各设备数据互相看不见）。
   var SYNC_ACCOUNT = 'shared';
   var SYNC_KEY = 'beiji_sync_v1';
-  var APP_VERSION = '2026.08.23r';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
+  var APP_VERSION = '2026.08.23s';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
   var cloudSha = null;        // 云端当前文件 sha（轮询判断是否变更）
   var cloudCardCount = 0;     // 云端当前卡片数（用于防“空覆盖”）
   var syncTimer = null;       // 实时同步轮询定时器
@@ -871,6 +871,15 @@
         state.dailyGoal.exam = parseInt(t.value, 10) || 0;
         save(); render(); return;
       }
+      if (t.id === 'pick-search' || t.id === 'pick-book') {
+        pickSearch = val('pick-search') || ''; pickBookFilter = val('pick-book') || ''; renderPickModal(); return;
+      }
+      if (t.id === 'rev-book-sel') {
+        state.reviewBook = t.value;
+        reviewQueue = null;
+        reviewSource = t.value ? state.cards.filter(function (c) { return c.book === t.value; }) : state.cards.slice();
+        applyReviewOrder(); save(); render(); return;
+      }
     });
     if (overlayEl) {
       // 弹窗里的按钮（解析/确认导入/关闭等）也要能触发 onClick，否则点了没反应
@@ -1153,6 +1162,66 @@
       (revealed ? '<div class="a">' + esc(card.a || '(无答案)') + '</div>' : '') + '</div>';
   }
 
+  // 复习范围切换栏：全部 / 专业（指定一本书）/ 自选（自由选卡）
+  function scopeBarHtml() {
+    var sc = state.reviewScope || 'all';
+    var books = bookList();
+    var bookOpts = '<option value="">— 选一本书 —</option>' + books.map(function (b) {
+      return '<option value="' + esc(b) + '"' + (state.reviewBook === b ? ' selected' : '') + '>' + esc(b) + '</option>';
+    }).join('');
+    var h = '<div class="scopebar"><span class="rolbl">复习范围</span>' +
+      '<button class="btn small ' + (sc === 'all' ? 'on' : '') + '" data-act="rev-scope" data-arg="all">全部</button>' +
+      '<button class="btn small ' + (sc === 'book' ? 'on' : '') + '" data-act="rev-scope" data-arg="book">专业</button>';
+    if (sc === 'book') h += '<select id="rev-book-sel" class="inp smallsel">' + bookOpts + '</select>';
+    h += '<button class="btn small ' + (sc === 'pick' ? 'on' : '') + '" data-act="rev-scope" data-arg="pick">自选</button>';
+    if (sc === 'pick') h += '<button class="btn small ghost" data-act="rev-pick-open">选卡片</button>';
+    h += '</div>';
+    return h;
+  }
+  // 自选：选卡预览面板（搜索 + 手动勾选任意张 + 区间顺选）
+  var pickSel = {}, pickSearch = '', pickBookFilter = '';
+  function pickCandidateList() {
+    var base = pickBookFilter ? state.cards.filter(function (c) { return c.book === pickBookFilter; }) : state.cards.slice();
+    if (pickSearch) {
+      var q = pickSearch.toLowerCase();
+      base = base.filter(function (c) { return (c.q || '').toLowerCase().indexOf(q) >= 0 || (c.a || '').toLowerCase().indexOf(q) >= 0; });
+    }
+    return base;
+  }
+  function renderPickModal() {
+    var base = pickCandidateList();
+    var books = bookList();
+    var bookOpts = '<option value="">全部书</option>' + books.map(function (b) {
+      return '<option value="' + esc(b) + '"' + (pickBookFilter === b ? ' selected' : '') + '>' + esc(b) + '</option>';
+    }).join('');
+    var shown = base.slice(0, 500);
+    var items = shown.map(function (c) {
+      return '<label class="pickrow"><input type="checkbox" data-act="rev-pick-toggle" data-arg="' + esc(c.id) + '"' + (pickSel[c.id] ? ' checked' : '') + '>' +
+        '<span class="pq">' + esc((c.q || '').slice(0, 70)) + '</span></label>';
+    }).join('');
+    if (base.length > shown.length) items += '<p class="hint">仅显示前 500 张，请用搜索 / 选书缩小范围。</p>';
+    var selCount = Object.keys(pickSel).filter(function (k) { return pickSel[k]; }).length;
+    var modal = document.getElementById('pick-modal');
+    if (!modal) { modal = document.createElement('div'); modal.id = 'pick-modal'; modal.className = 'modal-mask'; document.body.appendChild(modal); modal.addEventListener('click', onClick); }
+    modal.innerHTML =
+      '<div class="modal">' +
+      '<div class="lbl">选卡预览（勾选你想背的，可跨章跨书；也支持区间顺选）</div>' +
+      '<div class="pkbar"><input id="pick-search" class="inp" placeholder="搜索问题 / 答案…" value="' + esc(pickSearch) + '">' +
+      '<select id="pick-book" class="inp">' + bookOpts + '</select></div>' +
+      '<div class="pkbar"><span>区间：第</span><input id="pick-r1" class="num" type="number" min="1" value="1">' +
+      '<span>~</span><input id="pick-r2" class="num" type="number" min="1" value="' + Math.min(20, base.length || 1) + '">' +
+      '<span>张</span><button class="btn small" data-act="rev-pick-range">选区间</button>' +
+      '<button class="btn small" data-act="rev-pick-all">全选本范围</button>' +
+      '<button class="btn small ghost" data-act="rev-pick-clear">清空</button></div>' +
+      '<div class="picklist">' + items + '</div>' +
+      '<div class="pkfoot"><span class="hint">已选 <b id="pick-cnt">' + selCount + '</b> 张</span>' +
+      '<button class="btn primary" data-act="rev-pick-confirm">开始复习这 ' + selCount + ' 张</button>' +
+      '<button class="btn ghost" data-act="rev-pick-close">取消</button></div>' +
+      '</div>';
+    modal.classList.add('show');
+  }
+  function closePickModal() { var m = document.getElementById('pick-modal'); if (m) m.classList.remove('show'); }
+
   function viewReview() {
     if (reviewSetupPending) { renderReviewPlan(); return; }
     if (!reviewQueue) { if (!reviewSource || !reviewSource.length) reviewSource = (dueCards().length ? dueCards() : state.cards.slice()); applyReviewOrder(); }
@@ -1172,6 +1241,7 @@
     if (!reviewQueue || reviewQueue.length === 0) {
       var celebrate = (goal > 0 && done >= goal);
       viewEl.innerHTML = countdownBarHtml() + planBannerHtml() +
+        scopeBarHtml() +
         '<div class="card center"><div class="big">' + (celebrate ? '🏆' : '🎉') + '</div>' +
         '<p>' + (celebrate ? '今日目标已完成！' : '当前没有待复习的卡片。') + '</p>' +
         (celebrate ? '<p class="enc-text-lg">' + finishEncouragement() + '</p>' : '') +
@@ -1191,6 +1261,7 @@
     }
     viewEl.innerHTML =
       countdownBarHtml() + planBannerHtml() +
+      scopeBarHtml() +
       '<div class="goalbar"><span class="goaltxt">' + progressTxt + '</span>' +
       goalControlHtml(goal, 'rev-goal') + '</div>' +
       '<div class="encour">' + randomEncouragement('review') + '</div>' +
@@ -1228,6 +1299,7 @@
         '<p>今天暂时没有「到期」的卡片。</p>' +
         '<p class="hint">想巩固就把全部卡片混在一起过一遍：</p>' +
         '<button class="btn primary" data-act="plan-start" data-arg="all">复习全部卡片</button>' +
+        '<button class="btn" data-act="rev-pick-open">自选卡片…</button>' +
         '<button class="btn" data-act="plan-cancel">暂不复习</button></div>';
       return;
     }
@@ -1805,6 +1877,42 @@
     }
 
     if (act === 'review-all') { reviewQueue = null; reviewSource = state.cards.slice(); reviewSetupPending = false; applyReviewOrder(); render(); return; }
+    // 复习范围：全部 / 专业（一本书）/ 自选（自由选卡）
+    if (act === 'rev-scope') {
+      state.reviewScope = arg;
+      reviewQueue = null; reviewSource = null;
+      if (arg === 'all') {
+        reviewSource = (dueCards().length ? dueCards() : state.cards.slice());
+        applyReviewOrder();
+      } else if (arg === 'book') {
+        var _bs = bookList();
+        if (!state.reviewBook && _bs.length) state.reviewBook = _bs[0];
+        reviewSource = state.reviewBook ? state.cards.filter(function (c) { return c.book === state.reviewBook; }) : state.cards.slice();
+        applyReviewOrder();
+      } else if (arg === 'pick') {
+        pickSel = {}; pickSearch = ''; pickBookFilter = ''; renderPickModal(); save(); render(); return;
+      }
+      save(); render(); return;
+    }
+    if (act === 'rev-pick-open') { pickSel = {}; pickSearch = ''; pickBookFilter = ''; renderPickModal(); return; }
+    if (act === 'rev-pick-toggle') { pickSel[arg] = !pickSel[arg]; var _pc = document.getElementById('pick-cnt'); if (_pc) _pc.textContent = Object.keys(pickSel).filter(function (k) { return pickSel[k]; }).length; return; }
+    if (act === 'rev-pick-range') {
+      var _r1 = parseInt(val('pick-r1'), 10) || 1, _r2 = parseInt(val('pick-r2'), 10) || _r1;
+      var _base = pickCandidateList();
+      for (var _i = Math.max(0, _r1 - 1); _i < Math.min(_base.length, _r2); _i++) pickSel[_base[_i].id] = true;
+      renderPickModal(); return;
+    }
+    if (act === 'rev-pick-all') { pickCandidateList().forEach(function (c) { pickSel[c.id] = true; }); renderPickModal(); return; }
+    if (act === 'rev-pick-clear') { pickSel = {}; renderPickModal(); return; }
+    if (act === 'rev-pick-confirm') {
+      var _ids = Object.keys(pickSel).filter(function (k) { return pickSel[k]; });
+      if (!_ids.length) { toast('先勾选要背的卡片'); return; }
+      var _set = {}; _ids.forEach(function (k) { _set[k] = true; });
+      reviewSource = state.cards.filter(function (c) { return _set[c.id]; });
+      reviewQueue = null; applyReviewOrder();
+      closePickModal(); save(); render(); return;
+    }
+    if (act === 'rev-pick-close') { closePickModal(); return; }
     if (act === 'rev-start') {
       var total = reviewSource ? reviewSource.length : state.cards.length;
       var n = parseInt(val('rev-start-in'), 10);
