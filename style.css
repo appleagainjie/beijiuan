@@ -82,13 +82,30 @@ body{
 .stats b{display:block;font-size:22px;color:var(--primary);}
 .stats span{font-size:12px;color:var(--muted);}
 
-/* 书库：每本书背诵进度（仅「精通」计入完成） */
+/* 书库：每本书背诵进度（按熟悉度分色） */
 .bookprog{margin-top:8px;}
-.bpbar{height:7px;border-radius:7px;background:var(--border);overflow:hidden;}
-.bpfill{height:100%;border-radius:7px;background:var(--primary);transition:width .3s;}
-.bptxt{font-size:11px;color:var(--muted);margin-top:4px;line-height:1.5;}
+/* 多段分色进度条：精通绿/认识蓝/模糊黄/忘记红/未背灰（颜色固定，不受主题影响，便于区分熟悉度） */
+.bkbar{display:flex;height:9px;border-radius:7px;background:#e7eaee;overflow:hidden;}
+.bseg{height:100%;transition:width .3s;}
+.seg-master{background:#2fb86b;}
+.seg-know{background:#3aa0e6;}
+.seg-fuzzy{background:#f0b429;}
+.seg-forget{background:#e8604c;}
+.seg-none{background:#d7dce0;}
+.bptxt{font-size:11px;color:var(--muted);margin-top:5px;line-height:1.6;}
 .bptxt b{color:var(--primary);}
-.bp-done .bpfill{background:var(--accent);}
+.bptxt b.warn{color:#d99a00;}
+.bptxt b.bad{color:#e8604c;}
+.bp-done .bkbar{box-shadow:0 0 0 2px rgba(47,184,107,.35);}
+/* 图例 */
+.bklegend{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:11px;color:var(--muted);margin:8px 2px 2px;}
+.bklegend span{display:inline-flex;align-items:center;}
+.bklegend .dot{width:9px;height:9px;border-radius:3px;display:inline-block;margin-right:4px;}
+.dot.seg-master{background:#2fb86b;}
+.dot.seg-know{background:#3aa0e6;}
+.dot.seg-fuzzy{background:#f0b429;}
+.dot.seg-forget{background:#e8604c;}
+.dot.seg-none{background:#d7dce0;}
 
 /* 底部标签栏 */
 #tabbar{display:flex;background:var(--surface);border-top:1px solid var(--border);padding-bottom:env(safe-area-inset-bottom);}
