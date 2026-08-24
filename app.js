@@ -366,6 +366,26 @@
       var ctrl = ('AbortController' in window) ? new AbortController() : null;
       var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, timeoutMs) : null;
       function clearT() { if (timer) clearTimeout(timer); }
+      function readRaw() {
+        return fetch(rawUrl, { signal: ctrl ? ctrl.signal : undefined, cache: 'no-store' })
+          .then(function (r) { if (!r.ok) throw new Error('raw HTTP ' + r.status); return r.text(); }, function (e) { clearT(); throw e; })
+          .then(function (txt) {
+            if (!txt) throw new Error('raw empty');
+            try { return JSON.parse(txt); } catch (e) { throw new Error('解析云端数据失败'); }
+          });
+      }
+      function readBlob(sha) {
+        // raw 被重置时回退到 git/blobs API，该接口经 api.github.com，比 raw 直链更稳
+        var blobApi = 'https://api.github.com/repos/' + c.user + '/' + c.repo + '/git/blobs/' + sha;
+        return fetch(blobApi, { headers: headers })
+          .then(function (r) { if (!r.ok) throw new Error('blob HTTP ' + r.status); return r.json(); })
+          .then(function (b) {
+            if (!b || !b.content) throw new Error('blob empty');
+            var bin = atob(b.content), bytes = new Uint8Array(bin.length);
+            for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+            return JSON.parse(new TextDecoder().decode(bytes));
+          });
+      }
       return fetch(metaApi, { headers: headers, signal: ctrl ? ctrl.signal : undefined })
         .then(function (r) {
           if (r.status === 404) return { notFound: true };
@@ -378,13 +398,8 @@
         .then(function (meta) {
           if (meta && meta.notFound) return null;
           if (meta && meta.sha) { cloudSha = meta.sha; }
-          // raw 直链读取正文（无 1MB 限制，无需鉴权，公开仓库可用）
-          return fetch(rawUrl, { signal: ctrl ? ctrl.signal : undefined, cache: 'no-store' })
-            .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); }, function (e) { clearT(); throw e; })
-            .then(function (txt) {
-              if (!txt) return null;
-              try { return JSON.parse(txt); } catch (e) { throw new Error('解析云端数据失败'); }
-            });
+          // raw 直链读取正文；若被网络重置，自动回退到 git/blobs API（确保手机/国内网络也能读到云端最新）
+          return readRaw().catch(function (e) { return readBlob(cloudSha); });
         }, function (e) { clearT(); throw e; })
         .then(function (res) { clearT(); return res; });
     }
@@ -418,7 +433,7 @@
   // 从而“电脑/手机自动同步”真正生效（旧逻辑按各自登录手机号分文件，导致各设备数据互相看不见）。
   var SYNC_ACCOUNT = 'shared';
   var SYNC_KEY = 'beiji_sync_v1';
-  var APP_VERSION = '2026.08.24t';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
+  var APP_VERSION = '2026.08.24u';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
   var cloudSha = null;        // 云端当前文件 sha（轮询判断是否变更）
   var cloudCardCount = 0;     // 云端当前卡片数（用于防“空覆盖”）
   var syncTimer = null;       // 实时同步轮询定时器
