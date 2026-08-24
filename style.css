@@ -58,6 +58,11 @@ body{
 .flip .q{font-size:19px;font-weight:600;line-height:1.5;white-space:pre-wrap;}
 .flip .a{margin-top:12px;padding-top:12px;border-top:1px dashed var(--border);font-size:16px;color:var(--text);white-space:pre-wrap;}
 .prog{font-size:13px;color:var(--muted);margin-bottom:10px;}
+/* 复习翻卡导航（上一张/下一张/位置/重新开始） */
+.revnav{display:flex;align-items:center;gap:8px;margin:10px 0 14px;flex-wrap:wrap;}
+.revnav .btn{margin:0;}
+.revpos{font-size:13px;color:var(--muted);min-width:84px;text-align:center;}
+.revnav .btn.ghost{margin-left:auto;}
 .center{text-align:center;}
 .big{font-size:40px;font-weight:800;color:var(--primary);}
 .sub{font-size:13px;color:var(--muted);}
