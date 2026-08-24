@@ -39,6 +39,7 @@
   var GITHUB_KEY = 'beiji_gh';
   var AUTO_KEY = 'beiji_auto_v1';          // 记住本机已登录账号，实现“同设备自动登录”
   var reviewSource = null;                 // 当前复习队列的来源集合（待复习 / 全部 / 某本书）
+  var reviewPos = 0;                       // 复习翻卡游标：当前正在看的是 reviewQueue[reviewPos]（支持上一张/下一张）
   var libraryMode = 'books';               // 书库页：'books' 按书目 | 'cards' 管理卡片
   var manageSel = {};                      // 管理卡片：已选中的卡片 id -> true
   var manageBook = '';                     // 管理卡片：按书目筛选（'' = 全部）
@@ -95,7 +96,7 @@
 
   /* ---------- 工具 ---------- */
   function emptyState() {
-    return { cards: [], checkins: [], deletedIds: [], theme: 'mint-rabbit', ai: { url: '', key: '', model: 'gpt-4o-mini' }, bookOrder: [], reviewOrder: 'seq', dailyGoal: { review: 0, exam: 0 }, countdowns: [], reviewStart: 1, reviewScope: 'all', reviewBook: '', reviewPickIds: [] };
+    return { cards: [], checkins: [], deletedIds: [], theme: 'mint-rabbit', ai: { url: '', key: '', model: 'gpt-4o-mini' }, bookOrder: [], reviewOrder: 'seq', dailyGoal: { review: 0, exam: 0 }, countdowns: [], reviewStart: 1, reviewScope: 'all', reviewBook: '', reviewPickIds: [], reviewResume: null };
   }
   function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
   function pad(n) { return n < 10 ? '0' + n : '' + n; }
@@ -433,7 +434,7 @@
   // 从而“电脑/手机自动同步”真正生效（旧逻辑按各自登录手机号分文件，导致各设备数据互相看不见）。
   var SYNC_ACCOUNT = 'shared';
   var SYNC_KEY = 'beiji_sync_v1';
-  var APP_VERSION = '2026.08.24v';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
+  var APP_VERSION = '2026.08.24w';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
   var cloudSha = null;        // 云端当前文件 sha（轮询判断是否变更）
   var cloudCardCount = 0;     // 云端当前卡片数（用于防“空覆盖”）
   var syncTimer = null;       // 实时同步轮询定时器
@@ -693,6 +694,7 @@
   function save() {
     // 剥离会话级临时字段
     state.cards.forEach(function (c) { delete c._revealed; delete c._revealAt; });
+    snapshotReview();      // 同步把当前复习进度写入 state（随下面的 saveData 落盘，实现断点续背）
     reviewSource = null;   // 卡片变化后，复习队列来源待重建，避免用到旧集合
     clearTimeout(saveTimer);
     saveTimer = setTimeout(function () { saveData(state); }, 300);
@@ -752,16 +754,6 @@
     card.lastReview = now;
     card.updatedAt = now;
     return card;
-  }
-  // 把当前卡重插到队列前面（墨墨式短间隔复现）：首次约隔 2 张就再次出现，
-  // 连续答错则间隔逐步拉长；当队列只剩它自己时会一直复现，直到被「认识/精通」才出队
-  // —— 即「直到都背到了，才进行下一轮/新词」。
-  function requeueWrong() {
-    var c = reviewQueue.shift();
-    if (!c) return;
-    c._wrong = (c._wrong || 0) + 1;
-    var pos = Math.min(2 + c._wrong, Math.max(1, reviewQueue.length));
-    reviewQueue.splice(pos, 0, c);
   }
   function isToday(ts) {
     return !!ts && todayStr() === new Date(ts).toLocaleDateString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' }).replace(/\//g, '-');
@@ -890,6 +882,40 @@
       q = q.slice(start).concat(q.slice(0, start));
     }
     reviewQueue = q;
+  }
+
+  // 当前正在显示的复习卡（支持上一张/下一张游标）
+  function currentReviewCard() {
+    if (!reviewQueue || !reviewQueue.length) return null;
+    if (reviewPos < 0) reviewPos = 0;
+    if (reviewPos >= reviewQueue.length) reviewPos = reviewQueue.length - 1;
+    return reviewQueue[reviewPos];
+  }
+  // 把当前复习进度（队列卡片顺序 + 游标位置 + 范围定义）写入 state，随 save() 一起落盘
+  function snapshotReview() {
+    if (!reviewQueue || !reviewQueue.length) return;   // 没有正在进行的复习则不写（避免覆盖已有断点）
+    state.reviewResume = {
+      scope: state.reviewScope,
+      book: state.reviewBook,
+      pickIds: (state.reviewPickIds || []).slice(),
+      order: state.reviewOrder,
+      start: state.reviewStart || 1,
+      queueIds: reviewQueue.map(function (c) { return c.id; }),
+      pos: reviewPos,
+      at: Date.now()
+    };
+  }
+  // 退出重进时，按保存的卡片顺序与位置恢复复习队列（断点续背）
+  function restoreReviewResume() {
+    var r = state.reviewResume;
+    if (!r || !r.queueIds || !r.queueIds.length) return;
+    var byId = {};
+    state.cards.forEach(function (c) { byId[c.id] = c; });
+    var q = r.queueIds.map(function (id) { return byId[id]; }).filter(Boolean);
+    if (!q.length) { state.reviewResume = null; return; }
+    reviewQueue = q;
+    reviewSource = q.slice();
+    reviewPos = Math.max(0, Math.min(r.pos || 0, q.length - 1));
   }
 
   /* ---------- 初始化 ---------- */
@@ -1023,6 +1049,7 @@
     state.countdowns = state.countdowns || [];
     state.reviewStart = state.reviewStart || 1;
     state.deletedIds = (state.deletedIds || []).slice();
+    if (!reviewQueue) restoreReviewResume();   // 退出重进 → 自动恢复上次复习进度（断点续背）
     applyTheme();
     startSyncPolling(); // 本地模式也开启 90s 后台轮询 + 焦点/可见即同步，实现跨设备自动同步
     if (authEl) { authEl.classList.remove('show'); authEl.classList.add('hidden'); }
@@ -1326,7 +1353,7 @@
         (state.cards.length ? '<button class="btn primary" data-act="review-all">' + (goal > 0 ? '今天再背 ' + goal + ' 个' : '复习全部卡片') + '</button>' : '') + '</div>';
       return;
     }
-    var card = reviewQueue[0];
+    var card = currentReviewCard();
     var revealed = !!card._revealed;
     var order = state.reviewOrder || 'seq';
     var cntRev = reviewQueue.filter(function (c) { return (c.hist || []).length > 0; }).length;
@@ -1349,9 +1376,15 @@
       '</div>' +
       '<div class="rstart"><span class="rolbl">从哪开始</span>' +
       '<span>从第</span><input id="rev-start-in" class="num" type="number" min="1" value="' + (state.reviewStart || 1) + '">' +
-      '<span>张开始（共 ' + (reviewSource ? reviewSource.length : state.cards.length) + ' 张）</span>' +
+      '<span>张开始（共 ' + (reviewQueue ? reviewQueue.length : state.cards.length) + ' 张）</span>' +
       '<button class="btn small" data-act="rev-start">应用</button></div>' +
       '<div class="prog">待复习 ' + reviewQueue.length + ' 张（复习 ' + cntRev + ' · 新学 ' + cntNew + '）</div>' +
+      '<div class="revnav">' +
+        '<button class="btn small' + (reviewPos <= 0 ? ' disabled' : '') + '" data-act="rev-prev"' + (reviewPos <= 0 ? ' disabled' : '') + '>← 上一张</button>' +
+        '<span class="revpos">第 ' + (reviewPos + 1) + ' / ' + reviewQueue.length + ' 张</span>' +
+        '<button class="btn small' + (reviewPos >= reviewQueue.length - 1 ? ' disabled' : '') + '" data-act="rev-next"' + (reviewPos >= reviewQueue.length - 1 ? ' disabled' : '') + '>下一张 →</button>' +
+        '<button class="btn small ghost" data-act="rev-restart">重新开始本组</button>' +
+      '</div>' +
       flipCard(card, revealed) +
       nextHint +
       (revealed
@@ -1801,7 +1834,7 @@
     if (act === 'goal-unlim') {
       state.dailyGoal = state.dailyGoal || { review: 0, exam: 0 };
       state.dailyGoal.review = 0; reviewQueue = null; reviewSource = state.cards.slice();
-      reviewSetupPending = false; applyReviewOrder(); render(); return;
+      reviewSetupPending = false; applyReviewOrder(); reviewPos = 0; save(); render(); return;
     }
     // 备考倒计时：预设快捷填入 / 添加 / 删除
     if (act === 'cd-preset') {
@@ -1930,30 +1963,53 @@
 
     if (act === 'reveal') {
       if (exam) exam.revealed = true;
-      else if (reviewQueue && reviewQueue[0]) { reviewQueue[0]._revealed = true; reviewQueue[0]._revealAt = Date.now(); }
+      else { var _c = currentReviewCard(); if (_c) { _c._revealed = true; _c._revealAt = Date.now(); } }
       render(); return;
     }
 
+    if (act === 'rev-prev') { if (reviewQueue && reviewQueue.length && reviewPos > 0) { reviewPos--; save(); render(); } return; }
+    if (act === 'rev-next') { if (reviewQueue && reviewQueue.length && reviewPos < reviewQueue.length - 1) { reviewPos++; save(); render(); } return; }
+    if (act === 'rev-restart') {
+      // 重新开始本组：按当前范围 / 顺序 / 起点重建队列，从第一张开始（清掉断点续背进度）
+      if (state.reviewScope === 'pick') {
+        var _set = {}; (state.reviewPickIds || []).forEach(function (id) { _set[id] = true; });
+        reviewSource = state.cards.filter(function (c) { return _set[c.id]; });
+      } else if (state.reviewScope === 'book') {
+        reviewSource = state.reviewBook ? state.cards.filter(function (c) { return c.book === state.reviewBook; }) : state.cards.slice();
+      } else {
+        reviewSource = (dueCards().length ? dueCards() : state.cards.slice());
+      }
+      reviewPos = 0; applyReviewOrder(); reviewPos = 0;
+      state.reviewResume = null;
+      save(); render(); return;
+    }
+
     if (act === 'grade') {
-      if (!reviewQueue || !reviewQueue[0]) return;
-      var card = reviewQueue[0];
+      if (!reviewQueue || !reviewQueue.length) return;
+      var pos = reviewPos; if (pos < 0) pos = 0; if (pos >= reviewQueue.length) pos = reviewQueue.length - 1;
+      var card = reviewQueue[pos];
+      if (!card) return;
       var q = parseInt(arg, 10);
       var rt = card._revealAt ? (Date.now() - card._revealAt) : 0;
       grade(card, q, rt);
       card._revealed = false;
       if (q === 1 || q === 2) {
-        // 忘记/模糊：墨墨式短间隔重插——错的卡在接下来几张内立刻复现，
-        // 间隔随连续错误次数逐步拉长；只有答对才离开本轮（直到背到才下一轮）
-        requeueWrong();
+        // 忘记/模糊：墨墨式短间隔重插——从当前位置移除，再插到后面几张处复现（间隔随连续错误拉长）
+        card._wrong = (card._wrong || 0) + 1;   // 连错越多，重插间隔越长（先累加再算位置）
+        reviewQueue.splice(pos, 1);
+        var ins = Math.min(2 + (card._wrong || 0), Math.max(1, reviewQueue.length));
+        reviewQueue.splice(ins, 0, card);
+        if (reviewPos > reviewQueue.length - 1) reviewPos = reviewQueue.length - 1;
       } else {
-        reviewQueue.shift();
-        if (reviewQueue.length === 0) reviewQueue = null;
+        reviewQueue.splice(pos, 1);
+        if (reviewQueue.length === 0) { reviewQueue = null; state.reviewResume = null; }
+        else if (reviewPos >= reviewQueue.length) reviewPos = reviewQueue.length - 1;
       }
       save();
       render(); return;
     }
 
-    if (act === 'review-all') { reviewQueue = null; reviewSource = state.cards.slice(); reviewSetupPending = false; applyReviewOrder(); render(); return; }
+    if (act === 'review-all') { reviewQueue = null; reviewSource = state.cards.slice(); reviewSetupPending = false; applyReviewOrder(); reviewPos = 0; save(); render(); return; }
     // 复习范围：全部 / 专业（一本书）/ 自选（自由选卡）
     if (act === 'rev-scope') {
       state.reviewScope = arg;
@@ -1967,9 +2023,9 @@
         reviewSource = state.reviewBook ? state.cards.filter(function (c) { return c.book === state.reviewBook; }) : state.cards.slice();
         applyReviewOrder();
       } else if (arg === 'pick') {
-        pickSel = {}; pickSearch = ''; pickBookFilter = ''; renderPickModal(); save(); render(); return;
+        pickSel = {}; pickSearch = ''; pickBookFilter = ''; renderPickModal(); reviewPos = 0; save(); render(); return;
       }
-      save(); render(); return;
+      reviewPos = 0; save(); render(); return;
     }
     if (act === 'rev-pick-open') { pickSel = {}; pickSearch = ''; pickBookFilter = ''; renderPickModal(); return; }
     if (act === 'rev-pick-toggle') { pickSel[arg] = !pickSel[arg]; var _pc = document.getElementById('pick-cnt'); if (_pc) _pc.textContent = Object.keys(pickSel).filter(function (k) { return pickSel[k]; }).length; return; }
@@ -1985,8 +2041,10 @@
       var _ids = Object.keys(pickSel).filter(function (k) { return pickSel[k]; });
       if (!_ids.length) { toast('先勾选要背的卡片'); return; }
       var _set = {}; _ids.forEach(function (k) { _set[k] = true; });
+      state.reviewPickIds = _ids.slice();
       reviewSource = state.cards.filter(function (c) { return _set[c.id]; });
       reviewQueue = null; applyReviewOrder();
+      reviewPos = 0;
       closePickModal(); save(); render(); return;
     }
     if (act === 'rev-pick-close') { closePickModal(); return; }
@@ -1997,6 +2055,7 @@
       if (n > total && total > 0) n = total;
       state.reviewStart = n;
       reviewQueue = null; // 重建队列（applyReviewOrder 会按起始位置旋转）
+      applyReviewOrder(); reviewPos = 0;
       save();
       toast('已设置：从第 ' + n + ' 张开始');
       render(); return;
@@ -2024,7 +2083,7 @@
       state.reviewStart = pn;
       reviewSource = pcards.slice();
       reviewQueue = null; reviewSetupPending = false;
-      applyReviewOrder();
+      applyReviewOrder(); reviewPos = 0;
       previewBook = '';
       show('review'); return;
     }
@@ -2043,7 +2102,7 @@
       state.reviewStart = sn;
       reviewSource = src.slice();
       reviewQueue = null; reviewSetupPending = false;
-      applyReviewOrder();
+      applyReviewOrder(); reviewPos = 0;
       show('review'); return;
     }
 
