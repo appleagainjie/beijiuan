@@ -433,7 +433,7 @@
   // 从而“电脑/手机自动同步”真正生效（旧逻辑按各自登录手机号分文件，导致各设备数据互相看不见）。
   var SYNC_ACCOUNT = 'shared';
   var SYNC_KEY = 'beiji_sync_v1';
-  var APP_VERSION = '2026.08.24u';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
+  var APP_VERSION = '2026.08.24v';   // 每次上线递增；「我的」页底部会显示，用来肉眼确认浏览器是否已加载新版
   var cloudSha = null;        // 云端当前文件 sha（轮询判断是否变更）
   var cloudCardCount = 0;     // 云端当前卡片数（用于防“空覆盖”）
   var syncTimer = null;       // 实时同步轮询定时器
@@ -534,23 +534,37 @@
     var headers = { 'Authorization': 'token ' + c.token, 'Accept': 'application/vnd.github+json' };
     fetch(api, { headers: headers, cache: 'no-store' }).then(function (r) { return r.ok ? r.json() : null; }).then(function (meta) {
       if (!meta || !meta.sha || meta.sha === cloudSha) return;
+      var sha = meta.sha;
       var rawUrl = 'https://raw.githubusercontent.com/' + c.user + '/' + c.repo + '/main/data/' + encodeURIComponent(c.account) + '.json';
-      return fetch(rawUrl, { cache: 'no-store' }).then(function (r) { return r.ok ? r.text() : null; }).then(function (txt) {
-        if (!txt) return;
-        try {
-          var cloud = JSON.parse(txt);
-          cloudSha = meta.sha;
-          cloudCardCount = (cloud.cards || []).length;
-          var before = state.cards.length;
-          mergeCloudIntoState(cloud);
-          if (state.cards.length !== before) {
-            save();
-            if (view !== 'review' && view !== 'exam') render();
-          }
-          setSyncStatus(true, '已拉取云端更新（' + cloudCardCount + ' 张）');
-          renderSyncStatus();
-        } catch (e) {}
-      });
+      var blobApi = 'https://api.github.com/repos/' + c.user + '/' + c.repo + '/git/blobs/' + sha;
+      // raw 被墙时回退到 git/blobs API（手机/国内网络也能拿到正文）
+      fetch(rawUrl, { cache: 'no-store' })
+        .then(function (r) { if (!r.ok) throw new Error('raw'); return r.text(); })
+        .catch(function () {
+          return fetch(blobApi, { headers: headers })
+            .then(function (r) { if (!r.ok) throw new Error('blob'); return r.json(); })
+            .then(function (b) {
+              var bin = atob(b.content), bytes = new Uint8Array(bin.length);
+              for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+              return new TextDecoder().decode(bytes);
+            });
+        })
+        .then(function (txt) {
+          if (!txt) return;
+          try {
+            var cloud = JSON.parse(txt);
+            cloudSha = sha;
+            cloudCardCount = (cloud.cards || []).length;
+            var before = state.cards.length;
+            mergeCloudIntoState(cloud);
+            if (state.cards.length !== before) {
+              save();
+              if (view !== 'review' && view !== 'exam') render();
+            }
+            setSyncStatus(true, '已拉取云端更新（' + cloudCardCount + ' 张）');
+            renderSyncStatus();
+          } catch (e) {}
+        }).catch(function () {});
     }).catch(function () {});
   }
   function startSyncPolling() {
@@ -879,6 +893,32 @@
   }
 
   /* ---------- 初始化 ---------- */
+  // 新版本提示：仅比对版本号，发现新版本时在顶部弹一条「点此更新」，由用户决定是否刷新；
+  // 绝不自动 location.reload，避免无限刷新循环。点击会用唯一 query 串强制 CDN 取最新。
+  function checkAppVersion() {
+    try {
+      fetch('version.json?_=' + Date.now(), { cache: 'no-store' })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (j) {
+          if (!j || !j.version || j.version === APP_VERSION) return;
+          showUpdateBanner(j.version);
+        })
+        .catch(function () {});
+    } catch (e) {}
+  }
+  function showUpdateBanner(ver) {
+    if (document.getElementById('app-update-banner')) return;
+    var b = document.createElement('div');
+    b.id = 'app-update-banner';
+    b.textContent = '🆕 发现新版本（' + ver + '），点击立即更新';
+    b.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;background:#ff8a3d;color:#fff;' +
+      'text-align:center;padding:10px 12px;font-size:14px;font-weight:600;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.2)';
+    b.onclick = function () {
+      var sep = location.search ? '&' : '?';
+      location.href = location.pathname + location.search + sep + '__v=' + Date.now();
+    };
+    if (document.body) document.body.appendChild(b);
+  }
   function init() {
     viewEl = $('view'); tabEl = $('tabbar'); subEl = $('subtitle');
     overlayEl = $('overlay'); authEl = $('auth'); userbarEl = $('userbar');
@@ -925,7 +965,7 @@
 
     // 托管在 GitHub Pages 上 → 强制云端同步模式
     if (location.hostname.indexOf('github.io') >= 0 || location.hostname.indexOf('githubusercontent.com') >= 0) {
-      MODE = 'github'; boot(); return;
+      MODE = 'github'; checkAppVersion(); boot(); return;
     }
     // 本地/云工作室：优先已配置的云端；否则探测后端；最后单人本地
     var g = ghCfg();
@@ -936,6 +976,7 @@
         MODE = (j && j.mode === 'server') ? 'server' : 'local';
       }).catch(function () { MODE = 'local'; }).then(boot);
     }
+    checkAppVersion();
   }
 
   function boot() {
