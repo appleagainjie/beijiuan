@@ -989,19 +989,28 @@
       overlayEl.addEventListener('click', function (e) { if (e.target === overlayEl) closeImportModal(); });
     }
 
-    // 托管在 GitHub Pages 上 → 强制云端同步模式
-    if (location.hostname.indexOf('github.io') >= 0 || location.hostname.indexOf('githubusercontent.com') >= 0) {
-      MODE = 'github'; checkAppVersion(); boot(); return;
+    // 只要配置了 GitHub 同步（token/仓库/账号齐全），无论通过哪种方式打开网页
+    // —— GitHub Pages(github.io)、本机(localhost)、直接双击文件(file://)、
+    // 还是手机经局域网 IP(192.168.x / 10.x / 172.16-31.x)访问 —— 一律走云端同步模式。
+    // 这样彻底摆脱对 github.io 单一托管域名的依赖：只要 api.github.com 连通（已验证可达），
+    // 任何打开方式都能拉取/备份云端最新数据。
+    function isLan(ip) {
+      return /^192\.168\./.test(ip) || /^10\./.test(ip) || /^172\.(1[6-9]|2\d|3[01])\./.test(ip);
     }
-    // 本地/云工作室：优先已配置的云端；否则探测后端；最后单人本地
-    var g = ghCfg();
-    if (g && g.token && g.user && g.repo && g.account) {
-      MODE = 'github'; boot();
-    } else {
-      fetch('/api/ping').then(function (r) { return r.json(); }).then(function (j) {
-        MODE = (j && j.mode === 'server') ? 'server' : 'local';
-      }).catch(function () { MODE = 'local'; }).then(boot);
+    var h = location.hostname;
+    var reachableLocal = (h === 'localhost' || h === '127.0.0.1' || h === '' || location.protocol === 'file:' || isLan(h));
+    // 注意：同步所需的 token/仓库/账号是 app.js 内硬编码的全局常量（DEPLOY_TOKEN/DEPLOY_USER/
+    // DEPLOY_REPO/SYNC_ACCOUNT），与 localStorage 里用户是否手配过无关。因此直接用这些常量判定，
+    // 保证「只要代码带了云端配置，无论哪种打开方式都走云端同步」，不依赖 ghCfg()（它只读 localStorage）。
+    if (DEPLOY_TOKEN && DEPLOY_USER && DEPLOY_REPO && SYNC_ACCOUNT) {
+      MODE = 'github';
+      if (!reachableLocal) checkAppVersion(); // 非本地部署才弹「新版本」提示
+      boot(); return;
     }
+    // 兜底：没配云端时探测后端，最后退回单人本地
+    fetch('/api/ping').then(function (r) { return r.json(); }).then(function (j) {
+      MODE = (j && j.mode === 'server') ? 'server' : 'local';
+    }).catch(function () { MODE = 'local'; }).then(boot);
     checkAppVersion();
   }
 
